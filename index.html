@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="theme-color" content="#090d18">
+	<meta name="color-scheme" content="dark">
+	<title>Too Many Tokens — LLM quota dashboard</title>
+	<link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+	<div class="app-shell">
+		<aside class="sidebar" aria-label="Primary navigation">
+			<a class="brand" href="#/overview" aria-label="Too Many Tokens dashboard">
+				<span class="brand-mark" aria-hidden="true">
+					<svg viewBox="0 0 28 28" role="img">
+						<path d="M6 19.5 11.2 9l4.1 7.2L18.8 10 23 19.5" />
+						<path d="M7.5 19.5h13" />
+					</svg>
+				</span>
+				<span><strong>Too Many Tokens</strong></span>
+			</a>
+
+			<nav class="nav-list">
+				<a class="nav-item active" href="#/overview" data-page="overview">
+					<span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"></rect><rect x="14" y="4" width="6" height="6" rx="1"></rect><rect x="4" y="14" width="6" height="6" rx="1"></rect><rect x="14" y="14" width="6" height="6" rx="1"></rect></svg></span> Overview
+				</a>
+				<a class="nav-item" href="#/setup" data-page="setup">
+					<span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h10"></path><path d="M18 7h2"></path><circle cx="16" cy="7" r="2"></circle><path d="M4 17h2"></path><path d="M10 17h10"></path><circle cx="8" cy="17" r="2"></circle><path d="M4 12h5"></path><path d="M13 12h7"></path><circle cx="11" cy="12" r="2"></circle></svg></span> Setup
+				</a>
+			</nav>
+		</aside>
+
+		<div class="workspace">
+			<main id="app"></main>
+		</div>
+	</div>
+
+	<script src="tracker-core.js"></script>
+	<script src="providers.js"></script>
+	<script src="app.js"></script>
+</body>
+
+</html>

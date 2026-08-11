@@ -1,0 +1,13 @@
+node_modules/
+web-app.log
+web-app.err
+test-results/
+playwright-report/
+graphify-out/
+
+# Personal data - never publish
+docs
+
+# Private working notes for AI assistants - not for the public repo
+AGENTS.md
+CLAUDE.md

@@ -1,0 +1,1572 @@
+'use strict';
+
+const STORAGE_KEY = 'llmRunRateTracker.models';
+const PREFERENCES_STORAGE_KEY = 'llmRunRateTracker.preferences';
+const PREFERENCES_SCHEMA_VERSION = 4;
+const LEGACY_PREFERENCES_SCHEMA_VERSIONS = Object.freeze([1, 2, 3]);
+const EXTENSION_BRIDGE_CHANNEL = 'llm-run-rate-tracker';
+const DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 30;
+const MIN_AUTO_SYNC_INTERVAL_SECONDS = 30;
+const MAX_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60;
+const SCAN_REQUEST_TIMEOUT_MS = 45_000;
+const CHART_COLORS = ['violet', 'cyan', 'mint', 'amber', 'rose', 'blue'];
+const PAGE_CONFIG = Object.freeze({
+	overview: { title: 'Overview' },
+	setup: { title: 'Setup' }
+});
+const ICON_PATHS = Object.freeze({
+	refresh: '<path d="M20 7v5h-5"></path><path d="M4 17v-5h5"></path><path d="M6.1 8.5A7 7 0 0 1 18.8 7L20 12"></path><path d="M18 15.5A7 7 0 0 1 5.2 17L4 12"></path>',
+	duplicate: '<rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>',
+	settings: '<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path>',
+	chevron: '<path d="m7 10 5 5 5-5"></path>',
+	check: '<path d="m7 12 3 3 7-7"></path>',
+	plus: '<path d="M12 5v14"></path><path d="M5 12h14"></path>'
+});
+const trackerCore = globalThis.TrackerCore
+	|| (typeof require === 'function' ? require('./tracker-core.js') : null);
+const providers = globalThis.UsageProviders
+	|| (typeof require === 'function' ? require('./chrome-extension/providers.js') : null);
+const {
+	DAY_NAMES,
+	DEFAULT_MODEL,
+	computeModel,
+	mergeScrapedPayload,
+	normalizeSourceUrl
+} = trackerCore;
+
+let autoScanTimer = null;
+let autoScanStatus = typeof document !== 'undefined' ? 'Finding provider tabs…' : 'Ready';
+let availableTabs = [];
+let selectedTabIds = [];
+let scanInProgress = false;
+let tabDiscoveryInProgress = typeof document !== 'undefined';
+let pendingSettingsId = null;
+const expandedSettings = new Set();
+let preferences = defaultPreferences();
+let renderedPage = '';
+
+function defaultPreferences() {
+	return {
+		schemaVersion: PREFERENCES_SCHEMA_VERSION,
+		autoSyncEnabled: false,
+		autoSyncIntervalSeconds: DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
+		overviewPaceView: 'bars',
+		providerTabs: {
+			initialized: false,
+			selectedTabs: []
+		}
+	};
+}
+
+function normalizeAutoSyncIntervalSeconds(value) {
+	const seconds = Number(value);
+	if (!Number.isFinite(seconds)) return DEFAULT_AUTO_SYNC_INTERVAL_SECONDS;
+	return clamp(Math.round(seconds), MIN_AUTO_SYNC_INTERVAL_SECONDS, MAX_AUTO_SYNC_INTERVAL_SECONDS);
+}
+
+function formatAutoSyncInterval(value) {
+	const seconds = normalizeAutoSyncIntervalSeconds(value);
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds % 60 === 0) return `${seconds / 60}m`;
+	return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function autoSyncIntervalMilliseconds(value) {
+	return normalizeAutoSyncIntervalSeconds(value) * 1000;
+}
+
+function stableTabUrl(value) {
+	return normalizeSourceUrl(value);
+}
+
+function tabSelectionProviderKey(value) {
+	try {
+		const url = new URL(String(value || '').trim());
+		const hostname = url.hostname.toLowerCase();
+		const pathname = url.pathname.replace(/\/+$/, '') || '/';
+		const hashPath = url.hash.replace(/^#\/?/, '/').replace(/\/+$/, '');
+		const normalizedPathname = pathname.toLowerCase();
+		const normalizedHashPath = hashPath.toLowerCase();
+
+		const hit = providers.PROVIDERS.find((p) => p.matchesRoute(hostname, normalizedPathname, normalizedHashPath));
+		return hit ? hit.key : '';
+	} catch (error) {
+		return '';
+	}
+}
+
+function providerKeyMatchesUrl(providerKey, value) {
+	try {
+		const hostname = new URL(String(value || '').trim()).hostname.toLowerCase();
+		const provider = providers.PROVIDERS.find((p) => p.key === providerKey);
+		return provider ? provider.matchesHost(hostname) : false;
+	} catch (error) {
+		return false;
+	}
+}
+
+function tabSelectionDescriptor(value) {
+	const rawUrl = typeof value === 'string' ? value : value?.url;
+	const url = stableTabUrl(rawUrl);
+	if (!url) return null;
+	const detectedProviderKey = tabSelectionProviderKey(rawUrl);
+	const claimedProviderKey = typeof value === 'object' ? String(value?.providerKey || '') : '';
+	const providerKey = detectedProviderKey
+		|| (providerKeyMatchesUrl(claimedProviderKey, rawUrl) ? claimedProviderKey : '');
+	return { url, providerKey };
+}
+
+function sanitizePreferences(value) {
+	if (!value || ![...LEGACY_PREFERENCES_SCHEMA_VERSIONS, PREFERENCES_SCHEMA_VERSION].includes(value.schemaVersion)) {
+		return defaultPreferences();
+	}
+	const rawSelections = value.schemaVersion === 1
+		? (Array.isArray(value.providerTabs?.selectedUrls) ? value.providerTabs.selectedUrls : [])
+		: (Array.isArray(value.providerTabs?.selectedTabs) ? value.providerTabs.selectedTabs : []);
+	const selectedTabs = [];
+	const seenSelections = new Set();
+	rawSelections.forEach((selection) => {
+		const descriptor = tabSelectionDescriptor(selection);
+		if (!descriptor) return;
+		const identity = `${descriptor.url}\u0000${descriptor.providerKey}`;
+		if (seenSelections.has(identity)) return;
+		seenSelections.add(identity);
+		selectedTabs.push(descriptor);
+	});
+	return {
+		schemaVersion: PREFERENCES_SCHEMA_VERSION,
+		autoSyncEnabled: value.autoSyncEnabled === true,
+		autoSyncIntervalSeconds: normalizeAutoSyncIntervalSeconds(value.autoSyncIntervalSeconds),
+		overviewPaceView: ['graph', 'runway'].includes(value.overviewPaceView) ? value.overviewPaceView : 'bars',
+		providerTabs: {
+			initialized: value.providerTabs?.initialized === true,
+			selectedTabs
+		}
+	};
+}
+
+function loadPreferences(storage = globalThis.localStorage) {
+	try {
+		return sanitizePreferences(JSON.parse(storage?.getItem(PREFERENCES_STORAGE_KEY) || 'null'));
+	} catch (error) {
+		return defaultPreferences();
+	}
+}
+
+function savePreferences(value, storage = globalThis.localStorage) {
+	const sanitized = sanitizePreferences(value);
+	storage?.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(sanitized));
+	return sanitized;
+}
+
+function replacePreferences(value) {
+	preferences = savePreferences(value);
+	return preferences;
+}
+
+function reconcileTabSelections(tabs, value = preferences) {
+	const sanitized = sanitizePreferences(value);
+	const validTabs = (Array.isArray(tabs) ? tabs : [])
+		.filter((tab) => Number.isInteger(tab?.id) && stableTabUrl(tab?.url));
+	const descriptors = sanitized.providerTabs.selectedTabs.map((descriptor) => ({ ...descriptor }));
+	const unusedTabIndexes = new Set(validTabs.map((tab, index) => index));
+	const unmatchedDescriptorIndexes = new Set(descriptors.map((descriptor, index) => index));
+	const matches = [];
+
+	function assign(descriptorIndex, tabIndex) {
+		const tab = validTabs[tabIndex];
+		const current = tabSelectionDescriptor(tab);
+		if (current) descriptors[descriptorIndex] = current;
+		unusedTabIndexes.delete(tabIndex);
+		unmatchedDescriptorIndexes.delete(descriptorIndex);
+		matches.push({ descriptorIndex, tabId: tab.id });
+	}
+
+	for (const descriptorIndex of [...unmatchedDescriptorIndexes]) {
+		const descriptor = descriptors[descriptorIndex];
+		const candidateTabs = [...unusedTabIndexes].filter((index) => {
+			if (stableTabUrl(validTabs[index].url) !== descriptor.url) return false;
+			return !descriptor.providerKey
+				|| tabSelectionProviderKey(validTabs[index].url) === descriptor.providerKey;
+		});
+		if (candidateTabs.length === 1) assign(descriptorIndex, candidateTabs[0]);
+	}
+
+	for (const descriptorIndex of [...unmatchedDescriptorIndexes]) {
+		const descriptor = descriptors[descriptorIndex];
+		if (!descriptor.providerKey) continue;
+		const sameKeyDescriptors = [...unmatchedDescriptorIndexes]
+			.filter((index) => descriptors[index].providerKey === descriptor.providerKey);
+		const candidateTabs = [...unusedTabIndexes]
+			.filter((index) => tabSelectionProviderKey(validTabs[index].url) === descriptor.providerKey);
+		if (sameKeyDescriptors.length === 1 && candidateTabs.length === 1) {
+			assign(descriptorIndex, candidateTabs[0]);
+		}
+	}
+
+	matches.sort((left, right) => left.descriptorIndex - right.descriptorIndex);
+	return {
+		selectedTabIds: matches.map((match) => match.tabId),
+		matches,
+		preferences: {
+			...sanitized,
+			providerTabs: {
+				...sanitized.providerTabs,
+				selectedTabs: descriptors
+			}
+		}
+	};
+}
+
+function selectedTabIdsForPreferences(tabs, value = preferences) {
+	return reconcileTabSelections(tabs, value).selectedTabIds;
+}
+
+function toggleTabSelectionPreference(tabs, value, tabId) {
+	const tab = (Array.isArray(tabs) ? tabs : []).find((entry) => entry?.id === tabId);
+	const descriptor = tabSelectionDescriptor(tab);
+	if (!descriptor) return { changed: false, ...reconcileTabSelections(tabs, value) };
+	const reconciliation = reconcileTabSelections(tabs, value);
+	const existingMatch = reconciliation.matches.find((match) => match.tabId === tabId);
+	const selectedTabs = reconciliation.preferences.providerTabs.selectedTabs
+		.filter((selection, index) => index !== existingMatch?.descriptorIndex);
+	if (!existingMatch) selectedTabs.push(descriptor);
+	const nextPreferences = sanitizePreferences({
+		...reconciliation.preferences,
+		providerTabs: {
+			initialized: true,
+			selectedTabs
+		}
+	});
+	return { changed: true, ...reconcileTabSelections(tabs, nextPreferences) };
+}
+
+function hasRememberedTabSelections(value = preferences) {
+	return sanitizePreferences(value).providerTabs.selectedTabs.length > 0;
+}
+
+function isOpenAiUsageSurface(value) {
+	const providerKey = tabSelectionProviderKey(value);
+	return providerKey === 'provider:openai:codex-usage'
+		|| providerKey === 'provider:openai:chatgpt-usage';
+}
+
+function isOpenAiDayPayloadArtifact(payload) {
+	return String(payload?.provider || '').trim().toLowerCase() === 'openai'
+		&& String(payload?.modelName || '').trim().toLowerCase() === 'day'
+		&& /^day(?:-\d+)?$/u.test(String(payload?.metricKey || '').trim().toLowerCase())
+		&& String(payload?.metricLabel || '').trim().toLowerCase() === 'day'
+		&& isOpenAiUsageSurface(payload?.sourceUrl || payload?.page);
+}
+
+function isAutoScrapedOpenAiDayArtifact(model) {
+	if (String(model?.provider || '').trim().toLowerCase() !== 'openai'
+		|| String(model?.model || '').trim().toLowerCase() !== 'day'
+		|| !/^day(?:-\d+)?$/u.test(String(model?.metricKey || '').trim().toLowerCase())
+		|| String(model?.metricLabel || '').trim().toLowerCase() !== 'day'
+		|| Number(model?.daysInCycle) !== 7
+		|| Number(model?.hoursPerDay) !== 24) {
+		return false;
+	}
+	const sourceUrl = stableTabUrl(model?.sourceUrl);
+	if (!isOpenAiUsageSurface(sourceUrl)) return false;
+	try {
+		const evidence = String(model?.description || '').trim().match(/^Scraped from\s+(.+)$/i);
+		const lastUpdatedAt = new Date(model?.lastUpdatedAt);
+		return Boolean(evidence)
+			&& Number.isFinite(lastUpdatedAt.getTime())
+			&& stableTabUrl(evidence[1]) === sourceUrl;
+	} catch (error) {
+		return false;
+	}
+}
+
+function migrateStoredModels(models) {
+	const source = Array.isArray(models) ? models : [];
+	const migrated = source.filter((model) => !isAutoScrapedOpenAiDayArtifact(model));
+	return { models: migrated, changed: migrated.length !== source.length };
+}
+
+function loadModels() {
+	try {
+		const models = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+		if (!Array.isArray(models)) return [];
+		const migrated = migrateStoredModels(models);
+		if (migrated.changed) saveModels(migrated.models);
+		return migrated.models;
+	} catch (error) {
+		return [];
+	}
+}
+
+function saveModels(models) {
+	localStorage.setItem(STORAGE_KEY, JSON.stringify(models));
+}
+
+function id() {
+	return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function clamp(value, minimum, maximum) {
+	return Math.min(maximum, Math.max(minimum, value));
+}
+
+function formatPercent(value, digits = 0) {
+	return Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : '—';
+}
+
+function asValidDate(value) {
+	const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+	return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function effectiveResetDate(model, now = new Date()) {
+	const reset = asValidDate(model?.resetAt);
+	if (!reset) return null;
+	const totalHours = Number(model?.totalHours) || Number(model?.daysInCycle) * Number(model?.hoursPerDay);
+	const cycleMs = totalHours * 60 * 60 * 1000;
+	if (reset <= now && Number.isFinite(cycleMs) && cycleMs > 0) {
+		reset.setTime(reset.getTime() + (Math.floor((now.getTime() - reset.getTime()) / cycleMs) + 1) * cycleMs);
+	}
+	return reset;
+}
+
+function formatCountdown(resetAt, now = new Date()) {
+	const reset = asValidDate(resetAt);
+	if (!reset) return 'Reset time pending';
+	const difference = Math.max(0, reset.getTime() - now.getTime());
+	const totalMinutes = Math.ceil(difference / 60_000);
+	const days = Math.floor(totalMinutes / 1440);
+	const hours = Math.floor((totalMinutes % 1440) / 60);
+	const minutes = totalMinutes % 60;
+	if (days) return `${days}d ${hours}h`;
+	if (hours) return `${hours}h ${minutes}m`;
+	return `${minutes}m`;
+}
+
+function formatResetDateTime(resetAt) {
+	const reset = asValidDate(resetAt);
+	if (!reset) return 'Reset time pending';
+	const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+	const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+	const time = `${String(reset.getHours()).padStart(2, '0')}:${String(reset.getMinutes()).padStart(2, '0')}`;
+	return `${weekdays[reset.getDay()]}, ${reset.getDate()} ${months[reset.getMonth()]} ${reset.getFullYear()} at ${time}`;
+}
+
+function formatDurationHours(value) {
+	const hoursValue = Number(value);
+	if (!Number.isFinite(hoursValue)) return '—';
+	if (hoursValue <= 0) return 'Now';
+	const totalMinutes = Math.max(1, Math.ceil(hoursValue * 60));
+	const days = Math.floor(totalMinutes / 1440);
+	const hours = Math.floor((totalMinutes % 1440) / 60);
+	const minutes = totalMinutes % 60;
+	if (days) return hours ? `${days}d ${hours}h` : `${days}d`;
+	if (hours) return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+	return `${minutes}m`;
+}
+
+function projectedDepletionContext(model) {
+	const actual = clamp(Number(model?.actualCum) || 0, 0, 1);
+	const totalHours = Math.max(0, Number(model?.totalHours) || Number(model?.daysInCycle) * Number(model?.hoursPerDay) || 0);
+	const inferredCurrentHour = totalHours * clamp(Number(model?.flatCum) || 0, 0, 1);
+	const currentHour = clamp(Number.isFinite(Number(model?.currentHour)) ? Number(model.currentHour) : inferredCurrentHour, 0, totalHours);
+	const remainingHours = Math.max(0, Number.isFinite(Number(model?.remainingHours))
+		? Number(model.remainingHours)
+		: totalHours - currentHour);
+	const averageUsagePerHour = Number.isFinite(Number(model?.averageUsagePerHour))
+		? Math.max(0, Number(model.averageUsagePerHour))
+		: currentHour > 0 ? actual / currentHour : 0;
+	const hasProjectedHours = model?.projectedHoursToDepletion !== null
+		&& model?.projectedHoursToDepletion !== ''
+		&& Number.isFinite(Number(model?.projectedHoursToDepletion));
+	const projectedHours = hasProjectedHours
+		? Math.max(0, Number(model.projectedHoursToDepletion))
+		: actual >= 1 ? 0 : averageUsagePerHour > 0 ? (1 - actual) / averageUsagePerHour : null;
+
+	if (projectedHours === null) {
+		return { value: '—', note: 'not enough data', tone: 'steady', label: 'Projected depletion is unavailable until usage has increased' };
+	}
+	if (projectedHours <= 0) {
+		return { value: 'Now', note: 'quota depleted', tone: 'warning', label: 'Quota is already depleted' };
+	}
+	const withinCycle = projectedHours <= remainingHours;
+	const value = formatDurationHours(projectedHours);
+	return {
+		value: withinCycle ? value : '—',
+		note: withinCycle ? 'before reset' : 'not before reset',
+		tone: withinCycle ? 'warning' : 'healthy',
+		label: withinCycle
+			? `At the current average usage rate, depletion is projected in ${value}, before the reset`
+			: 'Quota is not projected to deplete before the reset'
+	};
+}
+
+function metricLabel(model) {
+	return String(model?.metricLabel || model?.quotaLabel || model?.model || 'Usage limit').trim();
+}
+
+function cycleLabel(model) {
+	const hours = Number(model?.totalHours) || Number(model?.daysInCycle) * Number(model?.hoursPerDay);
+	if (hours <= 6) return `${Math.round(hours)}-hour session`;
+	if (hours === 24) return 'Daily limit';
+	if (hours === 168) return 'Weekly limit';
+	if (hours > 0 && hours % 24 === 0) return `${Math.round(hours / 24)}-day limit`;
+	return hours > 0 ? `${Math.round(hours)}-hour limit` : 'Cycle pending';
+}
+
+function providerInitials(provider) {
+	const words = String(provider || 'LLM').trim().split(/\s+/).filter(Boolean);
+	return words.slice(0, 2).map((word) => word[0]).join('').toUpperCase() || 'LL';
+}
+
+function icon(name, className = '') {
+	const paths = ICON_PATHS[name];
+	if (!paths) return '';
+	return `<svg class="ui-icon${className ? ` ${className}` : ''}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths}</svg>`;
+}
+
+function paceDeltaContext(actualValue, idealValue) {
+	const actual = clamp(Number(actualValue) || 0, 0, 1);
+	const ideal = clamp(Number(idealValue) || 0, 0, 1);
+	const points = Math.round((actual - ideal) * 100);
+	if (Math.abs(points) < 1) return { label: 'On ideal pace', shortLabel: '0%', tone: 'steady' };
+	return points > 0
+		? { label: `+${points} points above ideal`, shortLabel: `+${points}%`, tone: 'warning' }
+		: { label: `${Math.abs(points)} points below ideal`, shortLabel: `−${Math.abs(points)}%`, tone: 'healthy' };
+}
+
+function visualStatus(model) {
+	const actual = clamp(Number(model?.actualCum) || 0, 0, 1);
+	const ideal = clamp(Number(model?.flatCum) || 0, 0, 1);
+	const threshold = Math.max(0.01, Number(model?.paceThreshold) || 0.02);
+	const difference = actual - ideal;
+	if (actual >= 0.9) return { tone: 'danger', label: 'Nearly spent' };
+	if (difference > threshold) return { tone: 'warning', label: 'Burning fast' };
+	if (difference < -threshold) return { tone: 'healthy', label: 'Room to spend' };
+	return { tone: 'steady', label: 'On track' };
+}
+
+function normalizedHistory(model) {
+	const history = Array.isArray(model?.usageHistory)
+		? model.usageHistory
+		: Array.isArray(model?.history) ? model.history : [];
+	return history.map((sample) => {
+		const date = asValidDate(sample?.timestamp || sample?.at);
+		let used = Number(sample?.usedPercent ?? sample?.actualCum);
+		if (used > 1) used /= 100;
+		return { at: date?.getTime(), used: clamp(used, 0, 1) };
+	}).filter((sample) => Number.isFinite(sample.at) && Number.isFinite(sample.used))
+		.sort((left, right) => left.at - right.at);
+}
+
+function trendSeriesIdentity(model) {
+	return [
+		model?.provider,
+		model?.sourceUrl,
+		model?.metricKey || metricLabel(model),
+		model?.id
+	].map((value) => String(value || '').trim().toLocaleLowerCase()).join('|');
+}
+
+function trendSeriesStyleSeed(model) {
+	const identity = trendSeriesIdentity(model);
+	let hash = 2166136261;
+	for (let index = 0; index < identity.length; index += 1) {
+		hash ^= identity.charCodeAt(index);
+		hash = Math.imul(hash, 16777619);
+	}
+	return (hash >>> 0) % CHART_COLORS.length;
+}
+
+function assignTrendSeriesStyles(entries) {
+	const assignments = new Map();
+	const used = new Set();
+	[...entries]
+		.sort((left, right) => trendSeriesIdentity(left.model).localeCompare(trendSeriesIdentity(right.model)))
+		.forEach((entry) => {
+			let colorIndex = trendSeriesStyleSeed(entry.model);
+			while (used.has(colorIndex) && used.size < CHART_COLORS.length) {
+				colorIndex = (colorIndex + 1) % CHART_COLORS.length;
+			}
+			used.add(colorIndex);
+			assignments.set(entry.model, colorIndex);
+		});
+	return entries.map((entry) => ({ ...entry, colorIndex: assignments.get(entry.model) ?? 0 }));
+}
+
+function trendChangeContext(points) {
+	if (!Array.isArray(points) || points.length < 2) {
+		return { label: '—', tone: 'neutral', resetDrop: false };
+	}
+	const change = (points.at(-1).used - points[0].used) * 100;
+	const rounded = Math.round(change * 10) / 10;
+	const magnitude = Math.abs(rounded).toLocaleString(undefined, { maximumFractionDigits: 1 });
+	const label = rounded > 0 ? `+${magnitude}%` : rounded < 0 ? `−${magnitude}%` : '0%';
+	const resetDrop = points.some((point, index) => index > 0 && points[index - 1].used - point.used >= 0.05);
+	return {
+		label,
+		tone: resetDrop ? 'reset' : rounded > 0 ? 'increase' : rounded < 0 ? 'decrease' : 'steady',
+		resetDrop
+	};
+}
+
+function trendTimeFormatOptions(spanMs) {
+	if (spanMs <= 24 * 60 * 60 * 1000) return { hour: 'numeric', minute: '2-digit' };
+	if (spanMs <= 7 * 24 * 60 * 60 * 1000) return { weekday: 'short', hour: 'numeric' };
+	if (spanMs <= 370 * 24 * 60 * 60 * 1000) return { month: 'short', day: 'numeric' };
+	return { month: 'short', year: 'numeric' };
+}
+
+function formatTrendTime(timestamp, spanMs) {
+	return new Intl.DateTimeFormat(undefined, trendTimeFormatOptions(spanMs)).format(new Date(timestamp));
+}
+
+function formatTrendRange(minimumTime, maximumTime) {
+	const spanMs = Math.max(0, maximumTime - minimumTime);
+	const options = spanMs <= 24 * 60 * 60 * 1000
+		? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+		: spanMs <= 370 * 24 * 60 * 60 * 1000
+			? { month: 'short', day: 'numeric' }
+			: { month: 'short', year: 'numeric' };
+	const formatter = new Intl.DateTimeFormat(undefined, options);
+	if (minimumTime === maximumTime) return formatter.format(new Date(maximumTime));
+	return `${formatter.format(new Date(minimumTime))} – ${formatter.format(new Date(maximumTime))}`;
+}
+
+function pageFromHash(value) {
+	const page = String(value || '').replace(/^#\/?/, '').split(/[/?]/)[0].toLowerCase();
+	if (['limits'].includes(page)) return 'overview';
+	if (['sources', 'settings'].includes(page)) return 'setup';
+	return Object.hasOwn(PAGE_CONFIG, page) ? page : 'overview';
+}
+
+function currentPage() {
+	return pageFromHash(typeof window !== 'undefined' ? window.location.hash : '');
+}
+
+function isTrackerEnabled(model) {
+	return model?.dashboardEnabled !== false;
+}
+
+function groupTrackers(models) {
+	const groups = new Map();
+	(Array.isArray(models) ? models : []).forEach((model) => {
+		const sourceUrl = String(model?.sourceUrl || '').trim();
+		const provider = String(model?.provider || 'Provider').trim() || 'Provider';
+		const key = sourceUrl || `manual:${provider.toLowerCase()}`;
+		if (!groups.has(key)) {
+			let sourceLabel = 'Manual trackers';
+			if (sourceUrl) {
+				try {
+					const url = new URL(sourceUrl);
+					sourceLabel = `${url.hostname}${url.pathname === '/' ? '' : url.pathname}`;
+				} catch (error) {
+					sourceLabel = sourceUrl;
+				}
+			}
+			groups.set(key, { key, provider, sourceUrl, sourceLabel, models: [] });
+		}
+		groups.get(key).models.push(model);
+	});
+	return [...groups.values()];
+}
+
+function groupModelsByProvider(models) {
+	const groups = new Map();
+	(Array.isArray(models) ? models : []).forEach((model) => {
+		const provider = String(model?.provider || 'Provider').trim() || 'Provider';
+		const key = provider.toLocaleLowerCase();
+		if (!groups.has(key)) groups.set(key, { key, provider, models: [] });
+		groups.get(key).models.push(model);
+	});
+	return [...groups.values()];
+}
+
+function titleCaseLabel(value) {
+	return String(value || '').replace(/\b([a-z])([a-z]*)/giu, (word, first, rest) => `${first.toLocaleUpperCase()}${rest.toLocaleLowerCase()}`);
+}
+
+function trackerDisplayLabel(model) {
+	const provider = String(model?.provider || 'Provider').trim() || 'Provider';
+	return `${provider} - ${titleCaseLabel(metricLabel(model))}`;
+}
+
+function sortTrackersAlphabetically(models) {
+	return [...(Array.isArray(models) ? models : [])].sort((left, right) => (
+		trackerDisplayLabel(left).localeCompare(trackerDisplayLabel(right), undefined, { sensitivity: 'base' })
+		|| String(left?.id || '').localeCompare(String(right?.id || ''), undefined, { sensitivity: 'base' })
+	));
+}
+
+function render() {
+	const container = document.getElementById('app');
+	if (!container) return;
+	const models = loadModels().map(computeModel);
+	const enabledModels = models.filter(isTrackerEnabled);
+	const page = currentPage();
+	const existingView = container.querySelector('.page-view');
+	const canPatch = renderedPage === page && existingView && container.querySelector('.dashboard-header');
+	if (canPatch) {
+		updateDashboardChrome(container);
+		const pageHtml = renderPage(page, models, enabledModels);
+		if (existingView.innerHTML !== pageHtml) {
+			existingView.innerHTML = pageHtml;
+			bindDashboardEvents(existingView);
+		}
+	} else {
+		container.innerHTML = renderDashboard(models, enabledModels, page);
+		bindDashboardEvents(container);
+	}
+	renderedPage = page;
+	updateNavigation(page);
+	if (page === 'setup' && pendingSettingsId) revealPendingSettings(container);
+}
+
+function updateDashboardChrome(container = document.getElementById('app')) {
+	if (!container) return;
+	const autoSync = autoSyncBadgeState();
+	const badge = container.querySelector('[data-auto-sync-state]');
+	if (badge) {
+		badge.dataset.autoSyncState = autoSync.state;
+		badge.classList.toggle('is-live', autoSync.state === 'on');
+		badge.innerHTML = `<i></i>${escapeHtml(autoSync.label)}`;
+	}
+	const syncButton = container.querySelector('.header-sync-button');
+	if (syncButton) {
+		const syncLabel = scanInProgress ? 'Refreshing and scanning provider tabs' : 'Sync provider tabs';
+		syncButton.classList.toggle('is-syncing', scanInProgress);
+		syncButton.disabled = scanInProgress;
+		syncButton.setAttribute('aria-label', syncLabel);
+		syncButton.title = syncLabel;
+	}
+}
+
+function autoSyncBadgeState(
+	enabled = preferences.autoSyncEnabled,
+	timerActive = Boolean(autoScanTimer),
+	selectedCount = selectedTabIds.length
+) {
+	if (!enabled) return { state: 'off', label: 'Auto-sync off' };
+	if (!timerActive || !selectedCount) return { state: 'waiting', label: 'Auto-sync waiting' };
+	return { state: 'on', label: 'Auto-sync on' };
+}
+
+function renderDashboard(models, enabledModels, page) {
+	const pageConfig = PAGE_CONFIG[page] || PAGE_CONFIG.overview;
+	const syncLabel = scanInProgress ? 'Refreshing and scanning provider tabs' : 'Sync provider tabs';
+	const autoSync = autoSyncBadgeState();
+	return `
+		<header class="dashboard-header">
+			<div class="mobile-brand"><span class="brand-mark">TMT</span><strong>Too Many Tokens</strong></div>
+			<h1>${escapeHtml(pageConfig.title)}</h1>
+			<div class="header-actions control-row">
+				<span class="live-pill ${autoSync.state === 'on' ? 'is-live' : ''}" data-auto-sync-state="${autoSync.state}"><i></i>${autoSync.label}</span>
+				<button class="header-sync-button ${scanInProgress ? 'is-syncing' : ''}" data-action="connect-scan" aria-label="${syncLabel}" title="${syncLabel}" ${scanInProgress ? 'disabled' : ''}>${icon('refresh')}</button>
+			</div>
+		</header>
+
+		${renderMobileNavigation(page)}
+		<div class="page-view page-${escapeHtml(page)}">${renderPage(page, models, enabledModels)}</div>
+	`;
+}
+
+function renderMobileNavigation(page) {
+	return `<nav class="mobile-tabs" aria-label="Dashboard pages">${Object.entries(PAGE_CONFIG).map(([key, config]) => `<a href="#/${key}" data-page="${key}" class="${key === page ? 'active' : ''}">${escapeHtml(config.title)}</a>`).join('')}</nav>`;
+}
+
+function renderPage(page, models, enabledModels) {
+	if (page === 'setup') return renderSetupPage(models);
+	const paceView = preferences.overviewPaceView === 'graph'
+		? renderPaceGraphs(enabledModels)
+		: preferences.overviewPaceView === 'runway'
+			? renderRunwayView(enabledModels)
+			: renderComparisonChart(enabledModels);
+	return `<section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
+}
+
+function renderPaceViewToggle(activeView = preferences.overviewPaceView) {
+	return `
+		<div class="pace-view-toggle" role="group" aria-label="Pace display">
+			<button type="button" class="${activeView === 'bars' ? 'active' : ''}" data-action="pace-view" data-pace-view="bars" aria-pressed="${activeView === 'bars'}">Bars</button>
+			<button type="button" class="${activeView === 'graph' ? 'active' : ''}" data-action="pace-view" data-pace-view="graph" aria-pressed="${activeView === 'graph'}">Graphs</button>
+			<button type="button" class="${activeView === 'runway' ? 'active' : ''}" data-action="pace-view" data-pace-view="runway" aria-pressed="${activeView === 'runway'}">Runway</button>
+		</div>
+	`;
+}
+
+function renderEmptyPacePanel(activeView) {
+	return `
+		<article class="panel chart-panel empty-chart">
+			<div class="panel-heading"><h2>Actual vs Ideal Pace</h2>${renderPaceViewToggle(activeView)}</div>
+			<div class="empty-visual chart" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+		</article>
+	`;
+}
+
+function renderComparisonChart(models) {
+	const ordered = sortTrackersAlphabetically(models).slice(0, 6);
+	if (!ordered.length) {
+		return renderEmptyPacePanel('bars');
+	}
+	const rows = ordered.map((model) => {
+		const actual = clamp(Number(model.actualCum) || 0, 0, 1);
+		const ideal = clamp(Number(model.flatCum) || 0, 0, 1);
+		const delta = paceDeltaContext(actual, ideal);
+		const depletion = projectedDepletionContext(model);
+		const reset = effectiveResetDate(model);
+		const resetContext = reset ? `resets ${formatResetDateTime(reset)} · in ${formatCountdown(reset)}` : 'reset pending';
+		const idealMarker = clamp(ideal * 100, 1, 99);
+		const colorIndex = Math.max(0, ordered.indexOf(model)) % CHART_COLORS.length;
+		return `
+				<div class="pace-row">
+					<div class="pace-identity">
+						<strong title="${escapeHtml(trackerDisplayLabel(model))}">${escapeHtml(trackerDisplayLabel(model))}</strong>
+						<span>${escapeHtml(cycleLabel(model))} · ${escapeHtml(resetContext)}</span>
+					</div>
+					<svg class="pace-row-track" viewBox="0 0 100 10" preserveAspectRatio="none" role="img" aria-label="${formatPercent(actual)} used, ${formatPercent(ideal)} ideal by now">
+						<title>${escapeHtml(trackerDisplayLabel(model))}: ${formatPercent(actual)} used; ${formatPercent(ideal)} ideal by now; ${escapeHtml(delta.label)}</title>
+						<rect class="pace-track" x="0" y="3" width="100" height="4" rx="2" />
+						<rect class="pace-value series-${colorIndex}" x="0" y="3" width="${actual * 100}" height="4" rx="2" />
+						<line class="ideal-marker" x1="${idealMarker}" y1="0.5" x2="${idealMarker}" y2="9.5" />
+					</svg>
+					<div class="pace-row-metrics">
+						<div><small>Used</small><strong>${formatPercent(actual)}</strong></div>
+						<div><small>Ideal now</small><strong>${formatPercent(ideal)}</strong></div>
+						<div class="pace-delta ${delta.tone}" title="${escapeHtml(delta.label)}"><small>Δ pace</small><strong>${escapeHtml(delta.shortLabel)}</strong></div>
+						<div class="pace-depletion ${depletion.tone}" title="${escapeHtml(depletion.label)}"><small>Projected depletion</small><strong>${escapeHtml(depletion.value)}<em>${escapeHtml(depletion.note)}</em></strong></div>
+					</div>
+				</div>
+			`;
+	}).join('');
+	return `
+		<article class="panel chart-panel">
+			<div class="panel-heading">
+				<h2>Actual vs Ideal Pace</h2>
+				<div class="pace-heading-actions">${renderPaceViewToggle('bars')}<div class="chart-legend"><span><i class="legend-actual"></i>Used quota</span><span><i class="legend-ideal"></i>Even-pace marker</span></div></div>
+			</div>
+			<div class="comparison-list">${rows}</div>
+		</article>
+	`;
+}
+
+function paceCurveData(model, nowValue = Date.now()) {
+	const totalHours = Math.max(1, Number(model?.totalHours) || (Number(model?.daysInCycle) || 7) * (Number(model?.hoursPerDay) || 24));
+	const cycleMs = totalHours * 60 * 60 * 1000;
+	const idealNow = clamp(Number(model?.flatCum) || 0, 0, 1);
+	const actualNow = clamp(Number(model?.actualCum) || 0, 0, 1);
+	const updatedAt = new Date(model?.lastUpdatedAt || '').getTime();
+	const history = normalizedHistory(model).slice(-30);
+	const anchorAt = Number.isFinite(updatedAt) ? updatedAt : (history.at(-1)?.at || Number(nowValue) || Date.now());
+	const points = history.map((point) => ({
+		x: idealNow - ((anchorAt - point.at) / cycleMs),
+		y: point.used
+	})).filter((point) => point.x >= 0 && point.x <= 1);
+	const last = points.at(-1);
+	if (!last || Math.abs(last.x - idealNow) > 0.002 || Math.abs(last.y - actualNow) > 0.002) {
+		points.push({ x: idealNow, y: actualNow });
+	}
+	return { actualNow, idealNow, points };
+}
+
+function renderPaceGraphs(models) {
+	const ordered = sortTrackersAlphabetically(models).slice(0, 6);
+	if (!ordered.length) return renderEmptyPacePanel('graph');
+	const cards = ordered.map((model) => {
+		const data = paceCurveData(model);
+		const delta = paceDeltaContext(data.actualNow, data.idealNow);
+		const depletion = projectedDepletionContext(model);
+		const reset = effectiveResetDate(model);
+		const resetContext = reset ? `Resets ${formatResetDateTime(reset)}` : 'Reset time pending';
+		const left = 34;
+		const right = 306;
+		const top = 14;
+		const bottom = 146;
+		const xFor = (value) => left + clamp(value, 0, 1) * (right - left);
+		const yFor = (value) => bottom - clamp(value, 0, 1) * (bottom - top);
+		const coordinates = data.points.map((point) => [xFor(point.x), yFor(point.y)]);
+		const actualPath = coordinates.map(([x, y], index) => `${index ? 'L' : 'M'} ${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+		const currentX = xFor(data.idealNow);
+		const currentY = yFor(data.actualNow);
+		const colorIndex = Math.max(0, ordered.indexOf(model)) % CHART_COLORS.length;
+		return `
+				<article class="pace-curve-card">
+					<header class="pace-curve-header">
+						<div><strong>${escapeHtml(trackerDisplayLabel(model))}</strong><span>${escapeHtml(cycleLabel(model))} · ${escapeHtml(resetContext)}</span></div>
+						<dl><div><dt>Used</dt><dd>${formatPercent(data.actualNow)}</dd></div><div><dt>Ideal Now</dt><dd>${formatPercent(data.idealNow)}</dd></div><div><dt>Δ Pace</dt><dd class="${delta.tone}">${escapeHtml(delta.shortLabel)}</dd></div><div class="pace-depletion ${depletion.tone}" title="${escapeHtml(depletion.label)}"><dt>Projected depletion</dt><dd>${escapeHtml(depletion.value)}<em>${escapeHtml(depletion.note)}</em></dd></div></dl>
+					</header>
+					<svg class="pace-curve" viewBox="0 0 320 176" role="img" aria-label="${escapeHtml(trackerDisplayLabel(model))}: actual ${formatPercent(data.actualNow)}, ideal ${formatPercent(data.idealNow)} at the current point in the cycle">
+						<title>${escapeHtml(trackerDisplayLabel(model))}: ${escapeHtml(delta.label)}</title>
+						${[0, 0.5, 1].map((value) => `<line class="pace-curve-grid" x1="${left}" y1="${yFor(value)}" x2="${right}" y2="${yFor(value)}"></line><text class="pace-curve-axis" x="28" y="${yFor(value) + 3}" text-anchor="end">${Math.round(value * 100)}%</text>`).join('')}
+						<line class="pace-curve-ideal" x1="${left}" y1="${bottom}" x2="${right}" y2="${top}"></line>
+						<line class="pace-curve-now" x1="${currentX}" y1="${top}" x2="${currentX}" y2="${bottom}"></line>
+						${coordinates.length > 1 ? `<path class="pace-curve-actual series-${colorIndex}" d="${actualPath}"></path>` : ''}
+						<circle class="pace-curve-dot series-${colorIndex}" cx="${currentX}" cy="${currentY}" r="4"></circle>
+						<text class="pace-curve-axis" x="${left}" y="166" text-anchor="start">Start</text><text class="pace-curve-axis pace-now-label" x="${currentX}" y="166" text-anchor="middle">Now</text><text class="pace-curve-axis" x="${right}" y="166" text-anchor="end">Reset</text>
+					</svg>
+				</article>
+			`;
+	}).join('');
+	return `
+		<article class="panel chart-panel pace-graphs-panel">
+			<div class="panel-heading">
+				<h2>Actual vs Ideal Pace</h2>
+				<div class="pace-heading-actions">${renderPaceViewToggle('graph')}<div class="chart-legend"><span><i class="legend-actual"></i>Actual</span><span><i class="legend-ideal"></i>Ideal</span></div></div>
+			</div>
+			<div class="pace-curve-grid-layout">${cards}</div>
+		</article>
+	`;
+}
+
+function runwayOutcome(model) {
+	const depletion = projectedDepletionContext(model);
+	const overrun = depletion.note === 'before reset' || depletion.note === 'quota depleted';
+	if (overrun) {
+		return {
+			state: 'overrun',
+			status: depletion.note === 'quota depleted' ? 'Runway exhausted' : 'Overrun projected',
+			detail: depletion.note === 'quota depleted'
+				? 'The quota is already depleted.'
+				: `At the current burn rate, the quota runs out in ${depletion.value}, before reset.`,
+			depletion
+		};
+	}
+	if (depletion.note === 'not enough data') {
+		return {
+			state: 'safe',
+			status: 'Holding position',
+			detail: 'No measurable burn rate yet; no overrun is projected.',
+			depletion
+		};
+	}
+	return {
+		state: 'safe',
+		status: 'Stops with room',
+		detail: 'No depletion is projected before this reset.',
+		depletion
+	};
+}
+
+function renderRunwayView(models) {
+	const ordered = sortTrackersAlphabetically(models).slice(0, 6);
+	if (!ordered.length) return renderEmptyPacePanel('runway');
+	const cards = ordered.map((model) => {
+		const outcome = runwayOutcome(model);
+		const reset = effectiveResetDate(model);
+		const resetDateTime = reset ? formatResetDateTime(reset) : 'pending';
+		const resetCountdown = reset ? `in ${formatCountdown(reset)}` : '';
+		const actual = clamp(Number(model.actualCum) || 0, 0, 1);
+		const sceneLabel = `${trackerDisplayLabel(model)}: ${outcome.status}. ${outcome.detail}`;
+		return `
+			<article class="runway-card runway-${outcome.state}">
+				<header class="runway-card-header">
+					<div><strong>${escapeHtml(trackerDisplayLabel(model))}</strong><span>${escapeHtml(cycleLabel(model))} · ${formatPercent(actual)} used</span></div>
+					<span class="runway-outcome"><i></i>${escapeHtml(outcome.status)}</span>
+				</header>
+				<div class="runway-stage" role="img" aria-label="${escapeHtml(sceneLabel)}">
+					<div class="runway-sky" aria-hidden="true"><i></i><i></i><i></i></div>
+					<div class="runway-horizon" aria-hidden="true"></div>
+					<div class="runway-abyss" aria-hidden="true"></div>
+					<div class="runway-strip" aria-hidden="true">
+						<div class="runway-end">
+							<div class="runway-pavement">
+								<div class="runway-centerline">${Array.from({ length: 8 }, () => '<i></i>').join('')}</div>
+							</div>
+							<div class="runway-drop-face"></div>
+							<div class="runway-threshold"><span></span><span></span><span></span><span></span><span></span></div>
+						</div>
+					</div>
+					<div class="runway-brake-glow" aria-hidden="true"></div>
+					<div class="aircraft-rig" aria-hidden="true">
+						<div class="aircraft-main">
+							<i class="aircraft-shadow"></i>
+							<i class="aircraft-wing aircraft-wing-left"></i>
+							<i class="aircraft-wing aircraft-wing-right"></i>
+							<i class="aircraft-tailplane aircraft-tailplane-left"></i>
+							<i class="aircraft-tailplane aircraft-tailplane-right"></i>
+							<i class="aircraft-fuselage"></i>
+							<i class="aircraft-nose"></i>
+							<i class="aircraft-cockpit"></i>
+							<i class="aircraft-fin"></i>
+						</div>
+						<div class="aircraft-fragments"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+					</div>
+					<div class="runway-impact" aria-hidden="true"><i></i><i></i><i></i></div>
+					<div class="runway-hud" aria-hidden="true"><span>TAIL CAM</span><span>${outcome.state === 'safe' ? 'BRAKE' : 'OVERRUN'}</span></div>
+				</div>
+				<footer class="runway-card-footer">
+					<p>${escapeHtml(outcome.detail)}</p>
+					<dl><div><dt>Projected depletion</dt><dd>${escapeHtml(outcome.depletion.value)}<em>${escapeHtml(outcome.depletion.note)}</em></dd></div><div><dt>Reset</dt><dd>${escapeHtml(resetDateTime)}${resetCountdown ? `<em>${escapeHtml(resetCountdown)}</em>` : ''}</dd></div></dl>
+				</footer>
+			</article>
+		`;
+	}).join('');
+	return `
+		<article class="panel chart-panel runway-panel">
+			<div class="panel-heading">
+				<div><h2>Quota Runway</h2><p class="runway-intro">Current burn rate translated into stopping distance.</p></div>
+				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span><i class="runway-safe-key"></i>Stops before reset</span><span><i class="runway-overrun-key"></i>Quota depleted first</span></div></div>
+			</div>
+			<div class="runway-grid-layout">${cards}</div>
+		</article>
+	`;
+}
+
+function renderTrendChart(models) {
+	const availableSeries = models.map((model) => ({
+		model,
+		points: normalizedHistory(model).slice(-30)
+	})).filter((entry) => entry.points.length);
+	const series = assignTrendSeriesStyles(availableSeries.slice(0, 6));
+	if (!series.length) {
+		return renderEmptyPanel('Usage history', 'trend');
+	}
+	const allTimes = series.flatMap((entry) => entry.points.map((point) => point.at));
+	const dataMinimumTime = Math.min(...allTimes);
+	const dataMaximumTime = Math.max(...allTimes);
+	const minimumTime = dataMinimumTime === dataMaximumTime ? dataMaximumTime - 60 * 60 * 1000 : dataMinimumTime;
+	const maximumTime = dataMaximumTime;
+	const timeSpan = maximumTime - minimumTime;
+	const left = 46;
+	const right = 704;
+	const top = 16;
+	const bottom = 204;
+	const xFor = (time) => left + ((time - minimumTime) / timeSpan) * (right - left);
+	const yFor = (used) => bottom - used * (bottom - top);
+	const horizontalGrid = [0, 0.25, 0.5, 0.75, 1].map((value) => {
+		const y = yFor(value);
+		return `<line class="grid-line" x1="${left}" y1="${y}" x2="${right}" y2="${y}" /><text class="axis-label trend-y-label" x="36" y="${y + 4}" text-anchor="end">${Math.round(value * 100)}%</text>`;
+	}).join('');
+	const tickCount = timeSpan <= 6 * 60 * 60 * 1000 ? 5 : 4;
+	const timeTicks = Array.from({ length: tickCount }, (_, index) => minimumTime + (timeSpan * index) / (tickCount - 1));
+	const verticalGrid = timeTicks.map((timestamp, index) => {
+		const x = xFor(timestamp);
+		const anchor = index === 0 ? 'start' : index === timeTicks.length - 1 ? 'end' : 'middle';
+		return `<line class="grid-line grid-line-vertical" x1="${x}" y1="${top}" x2="${x}" y2="${bottom}" /><text class="axis-label trend-x-label" x="${x}" y="229" text-anchor="${anchor}">${escapeHtml(formatTrendTime(timestamp, timeSpan))}</text>`;
+	}).join('');
+	const paths = series.map((entry) => {
+		const coordinates = entry.points.map((point) => [xFor(point.at), yFor(point.used)]);
+		const path = coordinates.map(([x, y], pointIndex) => `${pointIndex ? 'L' : 'M'} ${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+		return coordinates.length > 1 ? `<path class="trend-line series-${entry.colorIndex}" d="${path}" />` : '';
+	}).join('');
+	const seriesByModel = new Map(series.map((entry) => [entry.model, entry]));
+	const summaryGroups = groupModelsByProvider(series.map((entry) => entry.model));
+	const summaries = summaryGroups.map((group, groupIndex) => {
+		const rows = group.models.map((model) => {
+			const entry = seriesByModel.get(model);
+			const current = entry.points.at(-1).used;
+			const change = trendChangeContext(entry.points);
+			const changeDescription = change.label === '—'
+				? 'No earlier sample'
+				: `${change.label} across displayed samples${change.resetDrop ? '; reset or correction drop detected' : ''}`;
+			return `
+				<article class="trend-summary-row">
+					<div class="trend-summary-metric"><i class="trend-series-swatch series-bg-${entry.colorIndex}" aria-hidden="true"></i><strong>${escapeHtml(metricLabel(model))}</strong></div>
+					<dl>
+						<div><dt>Current</dt><dd>${formatPercent(current)}</dd></div>
+						<div><dt>Change</dt><dd class="trend-change ${change.tone}" aria-label="${escapeHtml(changeDescription)}">${escapeHtml(change.label)}${change.resetDrop ? '<small>Reset/drop</small>' : ''}</dd></div>
+					</dl>
+				</article>
+			`;
+		}).join('');
+		return `<section class="trend-provider-summary" aria-labelledby="trend-provider-${groupIndex}"><h3 id="trend-provider-${groupIndex}">${escapeHtml(group.provider)}</h3><div class="trend-summary-list">${rows}</div></section>`;
+	}).join('');
+	const sampleCount = series.reduce((total, entry) => total + entry.points.length, 0);
+	return `
+		<article class="panel chart-panel">
+			<div class="panel-heading">
+				<h2>Usage trend</h2>
+				<div class="trend-meta" aria-label="Chart coverage"><span>${series.length} of ${availableSeries.length} shown</span><span>${sampleCount} sample${sampleCount === 1 ? '' : 's'}</span><span>Local · ${escapeHtml(formatTrendRange(dataMinimumTime, dataMaximumTime))}</span></div>
+			</div>
+			<svg class="trend-chart" viewBox="0 0 720 240" aria-hidden="true" focusable="false">
+				${horizontalGrid}${verticalGrid}${paths}
+			</svg>
+			<div class="trend-summary" aria-label="Usage trend details">${summaries}</div>
+		</article>
+	`;
+}
+
+function renderEmptyPanel(title, kind) {
+	return `
+		<article class="panel chart-panel empty-chart">
+			<div class="panel-heading"><h2>${escapeHtml(title)}</h2></div>
+			<div class="empty-visual ${escapeHtml(kind)}" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+		</article>
+	`;
+}
+
+function renderSourcesPanel() {
+	const autoSyncEnabled = preferences.autoSyncEnabled;
+	const autoSyncInterval = preferences.autoSyncIntervalSeconds;
+	const autoSyncIntervalLabel = formatAutoSyncInterval(autoSyncInterval);
+	const rememberedCount = preferences.providerTabs.selectedTabs.length;
+	return `
+		<section class="panel sources-panel" id="provider-connections">
+			<div class="section-heading sources-heading"><h2>Provider Connections</h2><div class="tracker-counts"><span>${selectedTabIds.length} connected</span><span>${rememberedCount} remembered</span></div></div>
+			<div class="sync-toolbar">
+				<div class="sync-status"><span class="sync-orb ${scanInProgress || tabDiscoveryInProgress ? 'spinning' : ''}">${icon('refresh')}</span><p>${escapeHtml(autoScanStatus)}</p></div>
+				<div class="control-row">
+					<label class="sync-interval"><span>Auto-sync interval</span><select data-auto-sync-interval aria-label="Auto-sync refresh interval">${[30, 60, 120, 300, 600, 900].map((seconds) => `<option value="${seconds}" ${seconds === autoSyncInterval ? 'selected' : ''}>${escapeHtml(formatAutoSyncInterval(seconds))}</option>`).join('')}</select></label>
+					<button class="secondary" data-action="refresh-tabs" ${scanInProgress || tabDiscoveryInProgress ? 'disabled' : ''}>Refresh Tabs</button>
+					<button data-action="scan-selected" ${!selectedTabIds.length || scanInProgress || tabDiscoveryInProgress ? 'disabled' : ''}>${scanInProgress ? 'Refreshing…' : 'Scan Selected'}</button>
+					<button class="secondary" data-action="toggle-auto" ${!selectedTabIds.length && !autoSyncEnabled ? 'disabled' : ''}>${autoSyncEnabled ? 'Stop Auto-Sync' : `Auto-Sync Every ${escapeHtml(autoSyncIntervalLabel)}`}</button>
+				</div>
+			</div>
+			${renderTabList()}
+		</section>
+	`;
+}
+
+function renderTabList() {
+	if (tabDiscoveryInProgress) {
+		return `<div class="tab-list tab-list-loading" role="status" aria-live="polite"><div class="tab-row-skeleton"><i></i><span></span></div><div class="tab-row-skeleton"><i></i><span></span></div><p>Finding provider tabs…</p></div>`;
+	}
+	if (!availableTabs.length) {
+		const rememberedCount = preferences.providerTabs.selectedTabs.length;
+		const message = rememberedCount
+			? `Waiting for ${rememberedCount} remembered provider tab${rememberedCount === 1 ? '' : 's'} to become available.`
+			: 'No provider tabs are available yet.';
+		return `<div class="tab-list empty-tabs"><p>${escapeHtml(message)}</p></div>`;
+	}
+	return `<div class="tab-list">${availableTabs.map((tab) => `
+		<label class="tab-row">
+			<input type="checkbox" data-tab-id="${Number(tab.id)}" ${selectedTabIds.includes(tab.id) ? 'checked' : ''}>
+			<span class="tab-check" aria-hidden="true">${icon('check')}</span>
+			<span class="tab-meta"><span class="tab-title-line"><a class="tab-title" href="${escapeHtml(tab.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(tab.title || tab.url)}</a>${tab.status === 'loading' ? '<span class="tab-state">Loading</span>' : ''}</span><small class="tab-url">${escapeHtml(tab.url)}</small></span>
+		</label>
+	`).join('')}</div>`;
+}
+
+function renderSetupPage(models) {
+	const groups = groupTrackers(models);
+	const enabledCount = models.filter(isTrackerEnabled).length;
+	const hiddenCount = models.length - enabledCount;
+	return `
+		<section class="setup-page" id="setup">
+			${renderSourcesPanel()}
+			<article class="panel tracker-manager">
+				<div class="section-heading tracker-manager-heading">
+					<h2>Dashboard Trackers</h2>
+					<div class="tracker-counts"><span>${enabledCount} shown</span><span>${hiddenCount} hidden</span></div>
+				</div>
+				${groups.length
+					? `<div class="tracker-groups">${groups.map(renderTrackerGroup).join('')}</div>`
+					: `<div class="setup-empty"><strong>No Trackers</strong><button data-action="connect-scan">Scan Provider Tabs</button></div>`}
+			</article>
+			${renderSettingsPanel(models)}
+		</section>
+	`;
+}
+
+function renderTrackerGroup(group, groupIndex) {
+	const shown = group.models.filter(isTrackerEnabled).length;
+	return `
+		<section class="tracker-group">
+			<header class="tracker-group-header">
+				<div class="quota-identity">
+					<span class="provider-mark series-bg-${groupIndex % CHART_COLORS.length}">${escapeHtml(providerInitials(group.provider))}</span>
+					<div><h3>${escapeHtml(group.provider)}</h3><small title="${escapeHtml(group.sourceLabel)}">${escapeHtml(group.sourceLabel)}</small></div>
+				</div>
+				<span class="group-count">${shown} of ${group.models.length} shown</span>
+			</header>
+			<div class="tracker-list">${group.models.map(renderTrackerControl).join('')}</div>
+		</section>
+	`;
+}
+
+function renderTrackerControl(model) {
+	const enabled = isTrackerEnabled(model);
+	const reset = effectiveResetDate(model);
+	return `
+		<div class="tracker-control ${enabled ? '' : 'is-hidden'}">
+			<div class="tracker-control-identity">
+				<strong>${escapeHtml(metricLabel(model))}</strong>
+				<span>${escapeHtml(cycleLabel(model))} · ${formatPercent(clamp(Number(model.actualCum) || 0, 0, 1))} used · ${reset ? `resets in ${escapeHtml(formatCountdown(reset))}` : 'reset pending'}</span>
+			</div>
+			<button class="tracker-toggle" type="button" role="switch" aria-checked="${enabled}" aria-label="${enabled ? 'Hide' : 'Show'} ${escapeHtml(metricLabel(model))} on the dashboard" data-action="toggle-tracker" data-model-id="${escapeHtml(model.id)}">
+				<span class="switch-track" aria-hidden="true"><span></span></span>
+				<span class="switch-label">${enabled ? 'Shown' : 'Hidden'}</span>
+			</button>
+		</div>
+	`;
+}
+
+function renderSettingsPanel(models) {
+	return `
+		<details class="panel settings-panel" id="advanced-settings">
+			<summary><strong>Manual Overrides</strong><span class="summary-chevron">${icon('chevron')}</span></summary>
+			<div class="settings-content">
+				<div class="settings-intro"><button class="secondary compact" data-action="add-model">${icon('plus', 'button-icon')}Add Tracker</button></div>
+				${models.length ? models.map(renderModelSettings).join('') : '<p class="muted">No Trackers</p>'}
+			</div>
+		</details>
+	`;
+}
+
+function renderModelSettings(model) {
+	const actualPercent = clamp(Number(model.actualCum) || 0, 0, 1) * 100;
+	return `
+		<details class="quota-settings" data-settings-id="${escapeHtml(model.id)}" ${expandedSettings.has(String(model.id)) ? 'open' : ''}>
+			<summary><span><strong>${escapeHtml(model.provider)} · ${escapeHtml(metricLabel(model))}</strong><small>${model.sourceUrl ? 'Auto-detected' : 'Manual limit'}</small></span><span class="summary-chevron">${icon('chevron')}</span></summary>
+			<div class="settings-body">
+				<div class="grid config-grid">
+					${renderInput(model, 'provider', 'Provider', 'text', model.provider)}
+					${renderInput(model, 'metricLabel', 'Display name', 'text', metricLabel(model))}
+					${renderInput(model, 'model', 'Model / scope', 'text', model.model)}
+					${renderInput(model, 'actualCumUsedPercent', 'Usage used (%)', 'number', actualPercent, { min: 0, max: 100, step: 0.1, kind: 'percent' })}
+					${renderInput(model, 'daysInCycle', 'Days in cycle', 'number', model.daysInCycle, { min: 1, step: 1 })}
+					${renderInput(model, 'hoursPerDay', 'Hours per day', 'number', model.hoursPerDay, { min: 1, step: 1 })}
+					${renderDaySelect(model)}
+					${renderInput(model, 'startHour', 'Start hour', 'number', model.startHour, { min: 0, max: 23, step: 1 })}
+					${renderInput(model, 'paceThreshold', 'Pace alert (%)', 'number', (Number(model.paceThreshold) || 0) * 100, { min: 0, max: 100, step: 0.5, kind: 'percent' })}
+				</div>
+				<div class="settings-actions"><span>${model.sourceUrl ? `Source: ${escapeHtml(shorten(model.sourceUrl, 64))}` : 'No provider source attached'}</span><div class="control-row"><button class="secondary compact" data-action="duplicate-model" data-model-id="${escapeHtml(model.id)}">Duplicate</button><button class="danger-button compact" data-action="delete-model" data-model-id="${escapeHtml(model.id)}">Delete limit</button></div></div>
+			</div>
+		</details>
+	`;
+}
+
+function renderInput(model, name, label, type, value, attributes = {}) {
+	const inputId = `${model.id}-${name}`;
+	const attrs = Object.entries(attributes).filter(([key]) => key !== 'kind')
+		.map(([key, attrValue]) => `${key}="${escapeHtml(attrValue)}"`).join(' ');
+	return `<div class="field"><label for="${escapeHtml(inputId)}">${escapeHtml(label)}</label><input id="${escapeHtml(inputId)}" type="${escapeHtml(type)}" value="${escapeHtml(value)}" data-model-id="${escapeHtml(model.id)}" data-field="${escapeHtml(name)}" ${attributes.kind ? `data-kind="${escapeHtml(attributes.kind)}"` : ''} ${attrs}></div>`;
+}
+
+function renderDaySelect(model) {
+	const inputId = `${model.id}-startDay`;
+	return `<div class="field"><label for="${escapeHtml(inputId)}">Cycle start day</label><select id="${escapeHtml(inputId)}" data-model-id="${escapeHtml(model.id)}" data-field="startDay">${DAY_NAMES.map((day) => `<option value="${day}" ${day === model.startDay ? 'selected' : ''}>${day}</option>`).join('')}</select></div>`;
+}
+
+function bindDashboardEvents(container) {
+	container.querySelectorAll('[data-action]').forEach((button) => {
+		button.addEventListener('click', async (event) => {
+			const action = event.currentTarget.dataset.action;
+			const modelId = event.currentTarget.dataset.modelId;
+			if (action === 'refresh-tabs') await refreshTabList();
+			if (action === 'scan-selected') await scanSelectedTabs();
+			if (action === 'connect-scan') await connectAndScan();
+			if (action === 'toggle-auto') {
+				preferences.autoSyncEnabled ? stopAutoScan() : startAutoScan();
+				render();
+			}
+			if (action === 'pace-view') {
+				const requestedView = event.currentTarget.dataset.paceView;
+				const nextView = ['graph', 'runway'].includes(requestedView) ? requestedView : 'bars';
+				replacePreferences({ ...preferences, overviewPaceView: nextView });
+				render();
+			}
+			if (action === 'open-settings') {
+				expandedSettings.add(String(modelId));
+				pendingSettingsId = String(modelId);
+				navigateTo('setup');
+			}
+			if (action === 'toggle-tracker') {
+				setTrackerEnabled(modelId, event.currentTarget.getAttribute('aria-checked') !== 'true');
+			}
+			if (action === 'add-model') addModel();
+			if (action === 'duplicate-model') duplicateModel(modelId);
+			if (action === 'delete-model') deleteModel(modelId);
+		});
+	});
+
+	container.querySelectorAll('[data-tab-id]').forEach((checkbox) => {
+		checkbox.addEventListener('change', () => toggleTabSelection(Number(checkbox.dataset.tabId)));
+	});
+
+	container.querySelectorAll('[data-auto-sync-interval]').forEach((select) => {
+		select.addEventListener('change', () => {
+			const autoSyncEnabled = preferences.autoSyncEnabled;
+			replacePreferences({ ...preferences, autoSyncIntervalSeconds: select.value });
+			if (autoSyncEnabled) {
+				stopAutoScan({ persist: false });
+				startAutoScan({ persist: false, immediate: false });
+			}
+			render();
+		});
+	});
+
+	container.querySelectorAll('[data-field]').forEach((input) => {
+		input.addEventListener('input', () => persistModelInput(input, false));
+		input.addEventListener('change', () => persistModelInput(input, true));
+	});
+
+	container.querySelectorAll('[data-settings-id]').forEach((details) => {
+		details.addEventListener('toggle', () => {
+			const modelId = String(details.dataset.settingsId);
+			details.open ? expandedSettings.add(modelId) : expandedSettings.delete(modelId);
+		});
+	});
+}
+
+function persistModelInput(input, shouldRender) {
+	let value = input.value;
+	if (input.type === 'number') value = input.value === '' ? '' : Number(input.value);
+	if (input.dataset.kind === 'percent' && value !== '') value = Number(value) / 100;
+	return updateModelField(input.dataset.modelId, input.dataset.field, value, shouldRender);
+}
+
+function cssEscape(value) {
+	return globalThis.CSS?.escape ? globalThis.CSS.escape(String(value)) : String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
+function updateNavigation(page) {
+	document.querySelectorAll('.nav-item[data-page]').forEach((link) => {
+		const isActive = link.dataset.page === page;
+		link.classList.toggle('active', isActive);
+		if (isActive) link.setAttribute('aria-current', 'page');
+		else link.removeAttribute('aria-current');
+	});
+	document.title = `${PAGE_CONFIG[page]?.title || PAGE_CONFIG.overview.title} — Too Many Tokens`;
+}
+
+function navigateTo(page) {
+	const targetPage = Object.hasOwn(PAGE_CONFIG, page) ? page : 'overview';
+	const targetHash = `#/${targetPage}`;
+	if (typeof window === 'undefined') return;
+	if (window.location.hash !== targetHash) {
+		window.location.hash = targetHash;
+		return;
+	}
+	render();
+	window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function revealPendingSettings(container) {
+	const modelId = pendingSettingsId;
+	pendingSettingsId = null;
+	const panel = document.getElementById('advanced-settings');
+	if (panel) panel.open = true;
+	const details = container.querySelector(`[data-settings-id="${cssEscape(modelId)}"]`);
+	if (!details) return;
+	details.open = true;
+	requestAnimationFrame(() => details.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+}
+
+function addModel() {
+	const models = loadModels();
+	const modelId = id();
+	models.unshift({ ...DEFAULT_MODEL, id: modelId, metricLabel: 'Custom limit', dashboardEnabled: true });
+	expandedSettings.add(String(modelId));
+	pendingSettingsId = String(modelId);
+	saveModels(models);
+	navigateTo('setup');
+}
+
+function duplicateModel(modelId) {
+	const models = loadModels();
+	const source = models.find((entry) => String(entry.id) === String(modelId));
+	if (!source) return;
+	const newId = id();
+	models.unshift({ ...source, id: newId, sourceUrl: '', metricKey: '', metricLabel: `${metricLabel(source)} copy`, dashboardEnabled: true });
+	expandedSettings.add(String(newId));
+	pendingSettingsId = String(newId);
+	saveModels(models);
+	navigateTo('setup');
+}
+
+function deleteModel(modelId) {
+	const models = loadModels().filter((entry) => String(entry.id) !== String(modelId));
+	expandedSettings.delete(String(modelId));
+	saveModels(models);
+	render();
+}
+
+function updateModelField(modelId, fieldName, value, shouldRender = true) {
+	const models = loadModels();
+	const index = models.findIndex((entry) => String(entry.id) === String(modelId));
+	if (index < 0) return false;
+	models[index] = { ...models[index], [fieldName]: value };
+	saveModels(models);
+	if (shouldRender && typeof document !== 'undefined') render();
+	return true;
+}
+
+function setTrackerEnabled(modelId, enabled) {
+	const models = loadModels();
+	const index = models.findIndex((entry) => String(entry.id) === String(modelId));
+	if (index < 0) return false;
+	models[index] = { ...models[index], dashboardEnabled: Boolean(enabled) };
+	saveModels(models);
+	if (typeof document !== 'undefined') render();
+	return true;
+}
+
+function toggleTabSelection(tabId) {
+	const update = toggleTabSelectionPreference(availableTabs, preferences, tabId);
+	if (!update.changed) return false;
+	replacePreferences(update.preferences);
+	selectedTabIds = update.selectedTabIds;
+	if (!hasRememberedTabSelections() && preferences.autoSyncEnabled) stopAutoScan();
+	render();
+	return true;
+}
+
+async function connectAndScan() {
+	const found = await refreshTabList(false);
+	if (found && selectedTabIds.length) await scanSelectedTabs();
+}
+
+async function refreshTabList(shouldRender = true) {
+	if (scanInProgress) return false;
+	tabDiscoveryInProgress = true;
+	autoScanStatus = 'Finding tabs…';
+	if (shouldRender && typeof document !== 'undefined') render();
+	else if (typeof document !== 'undefined') updateDashboardChrome();
+	const response = await sendExtensionRequest('EXTENSION_LIST_TABS');
+	if (!response?.ok || !Array.isArray(response.tabs)) {
+		autoScanStatus = response?.error
+			? `Extension error: ${response.error}`
+			: 'Extension not available. Reload the unpacked extension, then refresh this page.';
+		availableTabs = [];
+		selectedTabIds = [];
+		tabDiscoveryInProgress = false;
+		if (typeof document !== 'undefined') render();
+		return false;
+	}
+	availableTabs = response.tabs.filter((tab) => Number.isInteger(tab?.id) && stableTabUrl(tab?.url));
+	if (!preferences.providerTabs.initialized && availableTabs.length) {
+		replacePreferences({
+			...preferences,
+			providerTabs: {
+				initialized: true,
+				selectedTabs: availableTabs.map(tabSelectionDescriptor).filter(Boolean)
+			}
+		});
+	}
+	const reconciliation = reconcileTabSelections(availableTabs, preferences);
+	preferences = savePreferences(reconciliation.preferences);
+	selectedTabIds = reconciliation.selectedTabIds;
+	if (preferences.autoSyncEnabled && !selectedTabIds.length) {
+		autoScanStatus = hasRememberedTabSelections()
+			? 'Auto-sync on · waiting for selected tab'
+			: 'Auto-sync on · waiting for provider tabs';
+	} else {
+		autoScanStatus = availableTabs.length
+			? `${availableTabs.length} supported tab${availableTabs.length === 1 ? '' : 's'}`
+			: 'No supported tabs';
+	}
+	tabDiscoveryInProgress = false;
+	if (typeof document !== 'undefined' && (shouldRender || currentPage() === 'setup')) render();
+	else if (typeof document !== 'undefined') updateDashboardChrome();
+	return true;
+}
+
+async function scanSelectedTabs() {
+	if (scanInProgress) return;
+	if (!selectedTabIds.length) {
+		autoScanStatus = 'Select a tab';
+		if (typeof document !== 'undefined') render();
+		return;
+	}
+	scanInProgress = true;
+	autoScanStatus = 'Refreshing provider tabs…';
+	if (typeof document !== 'undefined' && currentPage() === 'setup') render();
+	else if (typeof document !== 'undefined') updateDashboardChrome();
+	try {
+		const response = await sendExtensionRequest(
+			'EXTENSION_SCAN_TABS',
+			{ tabIds: selectedTabIds },
+			SCAN_REQUEST_TIMEOUT_MS
+		);
+		if (!response?.ok || !Array.isArray(response.results)) {
+			autoScanStatus = response?.error
+				? `Extension error: ${response.error}`
+				: 'The extension did not return usage data.';
+			return;
+		}
+		const failures = Array.isArray(response.errors) ? response.errors : [];
+		if (!response.results.length) {
+			autoScanStatus = failures.length
+				? `No data: ${failures[0].message}`
+				: 'No quota data found';
+			return;
+		}
+		const updatedCount = applyScrapedPayloads(response.results);
+		const failureSuffix = failures.length ? ` · ${failures.length} failed` : '';
+		autoScanStatus = `${updatedCount} quota${updatedCount === 1 ? '' : 's'} synced${failureSuffix}`;
+	} finally {
+		scanInProgress = false;
+		if (typeof document !== 'undefined') render();
+	}
+}
+
+function mergePayloadIntoModels(models, payload) {
+	const scrapedAt = payload?.scrapedAt ? new Date(payload.scrapedAt) : new Date();
+	return mergeScrapedPayload(models, payload, {
+		now: Number.isFinite(scrapedAt.getTime()) ? scrapedAt : new Date(),
+		idFactory: id
+	});
+}
+
+function applyScrapedPayloads(payloads) {
+	let models = loadModels();
+	let updatedCount = 0;
+	(Array.isArray(payloads) ? payloads : [])
+		.filter((payload) => !isOpenAiDayPayloadArtifact(payload))
+		.forEach((payload) => {
+			const merged = mergePayloadIntoModels(models, payload);
+			if (merged.updated) {
+				models = merged.models;
+				updatedCount += 1;
+			}
+		});
+	if (updatedCount) saveModels(models);
+	return updatedCount;
+}
+
+function applyScrapedPayload(payload) {
+	return applyScrapedPayloads([payload]) === 1;
+}
+
+async function sendExtensionRequest(type, details = {}, timeoutMs = 15_000) {
+	return new Promise((resolve) => {
+		const responseType = `${type}_RESPONSE`;
+		const requestId = globalThis.crypto?.randomUUID?.() || id();
+		let timer;
+		function finish(payload) {
+			window.removeEventListener('message', onMessage);
+			clearTimeout(timer);
+			resolve(payload);
+		}
+		function onMessage(event) {
+			if (
+				event.source !== window
+				|| event.origin !== window.location.origin
+				|| event.data?.channel !== EXTENSION_BRIDGE_CHANNEL
+				|| event.data?.direction !== 'response'
+				|| event.data?.type !== responseType
+				|| event.data?.requestId !== requestId
+			) return;
+			finish(event.data.payload);
+		}
+		window.addEventListener('message', onMessage);
+		window.postMessage({
+			channel: EXTENSION_BRIDGE_CHANNEL,
+			direction: 'request',
+			type,
+			requestId,
+			details
+		}, window.location.origin);
+		timer = setTimeout(() => finish({ ok: false, error: 'Extension request timed out.' }), timeoutMs);
+	});
+}
+
+async function pollOpenTabs() {
+	if (scanInProgress) return;
+	const found = await refreshTabList(false);
+	if (!found) return;
+	if (!selectedTabIds.length) {
+		autoScanStatus = hasRememberedTabSelections()
+			? 'Auto-sync on · waiting for selected tab'
+			: 'Auto-sync on · waiting for provider tabs';
+		if (typeof document !== 'undefined' && currentPage() === 'setup') render();
+		else if (typeof document !== 'undefined') updateDashboardChrome();
+		return;
+	}
+	await scanSelectedTabs();
+}
+
+function startAutoScan({ persist = true, immediate = true } = {}) {
+	if (persist) replacePreferences({ ...preferences, autoSyncEnabled: true });
+	if (autoScanTimer) return true;
+	const intervalSeconds = normalizeAutoSyncIntervalSeconds(preferences.autoSyncIntervalSeconds);
+	autoScanStatus = selectedTabIds.length
+		? `Auto-sync on · every ${formatAutoSyncInterval(intervalSeconds)}`
+		: 'Auto-sync on · waiting for selected tab';
+	autoScanTimer = setInterval(pollOpenTabs, autoSyncIntervalMilliseconds(intervalSeconds));
+	if (immediate) void pollOpenTabs();
+	return true;
+}
+
+function stopAutoScan({ persist = true } = {}) {
+	if (autoScanTimer) {
+		clearInterval(autoScanTimer);
+		autoScanTimer = null;
+	}
+	if (persist) replacePreferences({ ...preferences, autoSyncEnabled: false });
+	autoScanStatus = 'Auto-sync off';
+}
+
+async function restoreProviderSync() {
+	const found = await refreshTabList(false);
+	if (!preferences.autoSyncEnabled) return found;
+	startAutoScan({ persist: false, immediate: false });
+	if (found && selectedTabIds.length) {
+		await scanSelectedTabs();
+	} else {
+		autoScanStatus = hasRememberedTabSelections()
+			? 'Auto-sync on · waiting for selected tab'
+			: 'Auto-sync on · waiting for provider tabs';
+		if (typeof document !== 'undefined') render();
+	}
+	return found;
+}
+
+function shorten(value, maximum) {
+	const text = String(value ?? '');
+	return text.length > maximum ? `${text.slice(0, maximum - 1)}…` : text;
+}
+
+function escapeHtml(text) {
+	return String(text ?? '').replace(/[&<>"']/g, (match) => ({
+		'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+	}[match]));
+}
+
+if (typeof document !== 'undefined') {
+	preferences = loadPreferences();
+	if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual';
+	window.addEventListener('hashchange', () => {
+		render();
+		window.scrollTo({ top: 0 });
+	});
+	render();
+	void restoreProviderSync();
+	requestAnimationFrame(() => window.scrollTo({ top: 0 }));
+}
+
+if (typeof module === 'object' && module.exports) {
+	module.exports = {
+		applyScrapedPayload,
+		applyScrapedPayloads,
+		autoSyncIntervalMilliseconds,
+		autoSyncBadgeState,
+		formatAutoSyncInterval,
+		formatResetDateTime,
+		groupModelsByProvider,
+		groupTrackers,
+		isAutoScrapedOpenAiDayArtifact,
+		isOpenAiDayPayloadArtifact,
+		isTrackerEnabled,
+		loadModels,
+		loadPreferences,
+		mergePayloadIntoModels,
+		migrateStoredModels,
+		normalizedHistory,
+		pageFromHash,
+		paceDeltaContext,
+		paceCurveData,
+		projectedDepletionContext,
+		renderDashboard,
+		renderPage,
+		renderPaceGraphs,
+		renderRunwayView,
+		renderTrendChart,
+		reconcileTabSelections,
+		savePreferences,
+		selectedTabIdsForPreferences,
+		setTrackerEnabled,
+		sendExtensionRequest,
+		stableTabUrl,
+		sortTrackersAlphabetically,
+		tabSelectionDescriptor,
+		tabSelectionProviderKey,
+		trackerDisplayLabel,
+		runwayOutcome,
+		toggleTabSelectionPreference,
+		trendChangeContext,
+		updateModelField,
+		visualStatus
+	};
+}

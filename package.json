@@ -1,0 +1,26 @@
+{
+  "name": "too-many-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local dashboard for tracking LLM usage against session, daily, and weekly limits.",
+  "license": "MIT",
+  "author": "Jako Menkveld",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JakoMenkveld/too-many-tokens.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JakoMenkveld/too-many-tokens/issues"
+  },
+  "homepage": "https://github.com/JakoMenkveld/too-many-tokens#readme",
+  "keywords": ["llm", "claude", "openai", "quota", "usage", "tracker"],
+  "scripts": {
+    "start": "node serve.js",
+    "test": "node --test",
+    "check": "node --check tracker-core.js && node --check app.js && node --check serve.js && node --check chrome-extension/providers.js && node --check chrome-extension/scraper.js && node --check chrome-extension/background.js && node --check chrome-extension/content-script.js",
+    "sync-manifest": "node scripts/sync-manifest.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
