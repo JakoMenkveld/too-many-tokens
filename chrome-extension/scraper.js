@@ -96,6 +96,22 @@
     return found;
   }
 
+  // True when a line carries no word of its own once the numbers, currency,
+  // units and reading verbs are removed — "$0.00 spent" and "1.2M tokens used"
+  // are readings, "Extra usage" and "Fable" are names.
+  function isValueOnlyLabel(value) {
+    const remainder = String(value || '')
+      .replace(/\p{Sc}/gu, ' ')
+      .replace(/[\d,.]+\s*(?:k|m|b|thousand|million|billion)?/gi, ' ')
+      .replace(
+        /\b(?:percent|tokens?|credits?|requests?|messages?|words?|spent|used|remaining|left|of|out)\b/gi,
+        ' '
+      )
+      .replace(/[^\p{L}]+/gu, ' ')
+      .trim();
+    return remainder === '';
+  }
+
   function cleanMetricLabel(value, fallback) {
     const normalized = String(value || '').replace(/\r\n?/g, '\n').replace(/\u0000/g, '');
     const tail = normalizeWhitespace(normalized);
@@ -113,10 +129,20 @@
       .split('\n')
       .map((line) => normalizeWhitespace(line).replace(/^[|•·:;\-–—]+|[|•·:;\-–—]+$/g, '').trim())
       .filter(Boolean);
-    let candidate = lines.at(-1) || '';
-    if (/^(?:usage|limits?|settings|overview|plan)$/i.test(candidate)) {
-      candidate = '';
+
+    // The nearest line above a percentage is often another reading rather than a
+    // name — "$0.00 spent", "1.2M tokens", "17%". Naming a tracker with one of
+    // those produces a row whose title is a number that then goes stale, so walk
+    // back to the closest line that actually names something.
+    let candidate = '';
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (/^(?:usage|limits?|settings|overview|plan)$/i.test(line)) continue;
+      if (isValueOnlyLabel(line)) continue;
+      candidate = line;
+      break;
     }
+
     if (candidate && candidate.length <= 100) {
       return candidate;
     }

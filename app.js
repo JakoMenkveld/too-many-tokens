@@ -1352,6 +1352,17 @@ async function refreshTabList(shouldRender = true) {
 	return true;
 }
 
+// A partly successful scan used to report only a count, so the one thing that
+// explains an empty tracker — why that tab produced nothing — was discarded.
+// Name the tab and say why.
+function describeScanFailures(failures) {
+	const [first] = failures;
+	const tab = availableTabs.find((candidate) => candidate.id === first.tabId);
+	const name = tab?.title ? String(tab.title).trim().slice(0, 40) : `tab ${first.tabId}`;
+	const others = failures.length > 1 ? ` (+${failures.length - 1} more)` : '';
+	return `${failures.length} failed — ${name}: ${first.message}${others}`;
+}
+
 async function scanSelectedTabs() {
 	if (scanInProgress) return;
 	if (!selectedTabIds.length) {
@@ -1383,7 +1394,7 @@ async function scanSelectedTabs() {
 			return;
 		}
 		const updatedCount = applyScrapedPayloads(response.results);
-		const failureSuffix = failures.length ? ` · ${failures.length} failed` : '';
+		const failureSuffix = failures.length ? ` · ${describeScanFailures(failures)}` : '';
 		autoScanStatus = `${updatedCount} quota${updatedCount === 1 ? '' : 's'} synced${failureSuffix}`;
 	} finally {
 		scanInProgress = false;
