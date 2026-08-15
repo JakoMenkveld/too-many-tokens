@@ -72,6 +72,48 @@ test('ignores duplicated OpenAI timeframe controls before metric keys are number
   ]);
 });
 
+// Shape taken from a real chatgpt.com Codex analytics page: a banner mentioning
+// its own reset sits above the quota cards, and each card puts the percentage
+// and the word "remaining" on separate lines.
+test('an OpenAI reset banner above the cards does not swallow their labels', () => {
+  const payloads = parseUsageSnapshots({
+    body: [
+      'Codex and Work Analytics',
+      'Group by:',
+      'Day',
+      'Usage',
+      "You're nearing your Codex and Work usage limit. Add credits to keep building"
+        + ' now, or upgrade for more usage. Your limit resets on Aug 20, 2026 5:40 AM.',
+      'Add credits',
+      'Balance',
+      'Codex and Work share the same usage limit.',
+      '',
+      'Weekly usage limit',
+      '',
+      '7%',
+      'remaining',
+      'Resets Aug 20, 2026 5:40 AM',
+      '',
+      'GPT-5.3-Codex-Spark',
+      '',
+      '100%',
+      'remaining'
+    ].join('\n'),
+    page: 'https://chatgpt.com/codex/cloud/settings/analytics',
+    title: 'Codex'
+  }, new Date('2026-08-15T07:00:00.000Z'));
+
+  assert.deepEqual(payloads.map((payload) => ({
+    metricKey: payload.metricKey,
+    metricLabel: payload.metricLabel,
+    currentPercent: payload.currentPercent
+  })), [
+    { metricKey: 'weekly', metricLabel: 'Weekly usage limit', currentPercent: 93 },
+    { metricKey: 'gpt-5-3-codex-spark', metricLabel: 'GPT-5.3-Codex-Spark', currentPercent: 0 }
+  ]);
+  assert.equal(payloads[0].resetDay, 'Thursday');
+});
+
 test('parses token ratios and compact quantity suffixes', () => {
   const payload = firstSnapshot({
     body: 'Tokens used: 1.2M of 2M tokens',

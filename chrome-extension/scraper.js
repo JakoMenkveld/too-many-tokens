@@ -408,9 +408,39 @@
       const previousEnd = index > 0 ? percentUsages[index - 1].end : 0;
       const nextStart = index + 1 < percentUsages.length ? percentUsages[index + 1].index : body.length;
       const prefix = `${body.slice(previousEnd, usage.index)}${usage.labelPrefix}`;
-      const prefixResetStart = resetStart(prefix, true);
-      let labelText = prefixResetStart >= 0 ? prefix.slice(0, prefixResetStart) : prefix;
-      let resetText = prefixResetStart >= 0 ? normalizeWhitespace(prefix.slice(prefixResetStart)) : '';
+
+      // Walk the lines above the percentage, nearest first: the closest line
+      // mentioning a reset is this metric's reset text, and the closest line that
+      // does not is its label. Cutting the whole prefix at its last "resets"
+      // instead discards the label whenever unrelated copy higher up mentions
+      // one — an OpenAI page carries a "Your limit resets on ..." banner above
+      // the quota cards, which swallowed every real label beneath it.
+      const prefixLines = prefix
+        .split('\n')
+        .map((line) => normalizeWhitespace(line))
+        .filter(Boolean);
+      let labelText = '';
+      let resetText = '';
+      for (let cursor = prefixLines.length - 1; cursor >= 0; cursor -= 1) {
+        const line = prefixLines[cursor];
+        const marker = resetStart(line, true);
+        if (marker < 0) {
+          labelText = line;
+          break;
+        }
+
+        if (!resetText) {
+          resetText = line.slice(marker);
+        }
+
+        // A compact layout puts the label and its reset on one line, so only
+        // keep walking when the whole line was reset text.
+        const beforeMarker = line.slice(0, marker).trim();
+        if (beforeMarker) {
+          labelText = beforeMarker;
+          break;
+        }
+      }
 
       if (!resetText) {
         const suffix = body.slice(usage.end, nextStart);
