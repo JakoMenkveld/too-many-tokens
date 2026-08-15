@@ -11,6 +11,9 @@ const {
   groupModelsByProvider,
   groupTrackers,
   isAutoScrapedOpenAiDayArtifact,
+  isAutoScrapedValueOnlyLabelArtifact,
+  isValueOnlyLabelPayloadArtifact,
+  isValueOnlyMetricLabel,
   isOpenAiDayPayloadArtifact,
   isTrackerEnabled,
   loadModels,
@@ -859,4 +862,49 @@ test('pace delta context reports percentage-point direction', () => {
     paceDeltaContext(0.3, 0.5),
     { label: '20 points below ideal', shortLabel: '−20%', tone: 'healthy' }
   );
+});
+
+test('a tracker named after a reading is recognised as a scraped artifact', () => {
+  assert.equal(isValueOnlyMetricLabel('$0.00 spent'), true);
+  assert.equal(isValueOnlyMetricLabel('1.2M tokens used'), true);
+  assert.equal(isValueOnlyMetricLabel('17%'), true);
+  assert.equal(isValueOnlyMetricLabel('0 credits remaining'), true);
+
+  // Real quota names must survive, including one that is only a model name.
+  assert.equal(isValueOnlyMetricLabel('Current session'), false);
+  assert.equal(isValueOnlyMetricLabel('All models'), false);
+  assert.equal(isValueOnlyMetricLabel('Fable'), false);
+  assert.equal(isValueOnlyMetricLabel('Weekly usage limit'), false);
+  assert.equal(isValueOnlyMetricLabel('GPT-5.3-Codex-Spark'), false);
+  assert.equal(isValueOnlyMetricLabel(''), false);
+});
+
+test('scraped value-named trackers are pruned, hand-made ones are kept', () => {
+  const scraped = {
+    id: 'scraped-spend',
+    provider: 'Claude',
+    model: '$0.00 spent',
+    metricKey: 'weekly-0-00-spent',
+    metricLabel: '$0.00 spent',
+    daysInCycle: 7,
+    hoursPerDay: 24,
+    lastUpdatedAt: '2026-08-15T07:00:00.000Z',
+    sourceUrl: 'https://claude.ai/settings/usage',
+    description: 'Scraped from https://claude.ai/settings/usage'
+  };
+  const handMade = { ...scraped, id: 'hand-made', description: 'My spend tracker' };
+  const namedQuota = { ...scraped, id: 'named', metricLabel: 'All models', metricKey: 'weekly-all-models' };
+
+  assert.equal(isAutoScrapedValueOnlyLabelArtifact(scraped), true);
+  assert.equal(isAutoScrapedValueOnlyLabelArtifact(handMade), false);
+  assert.equal(isAutoScrapedValueOnlyLabelArtifact(namedQuota), false);
+
+  const migrated = migrateStoredModels([scraped, handMade, namedQuota]);
+  assert.equal(migrated.changed, true);
+  assert.deepEqual(migrated.models.map((model) => model.id), ['hand-made', 'named']);
+});
+
+test('a payload named after a reading never becomes a tracker', () => {
+  assert.equal(isValueOnlyLabelPayloadArtifact({ metricLabel: '$0.00 spent' }), true);
+  assert.equal(isValueOnlyLabelPayloadArtifact({ metricLabel: 'Weekly usage limit' }), false);
 });

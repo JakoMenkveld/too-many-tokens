@@ -251,6 +251,46 @@ function isOpenAiUsageSurface(value) {
 		|| providerKey === 'provider:openai:chatgpt-usage';
 }
 
+// A quota block names what it limits. When the only text a provider puts beside
+// a percentage is another reading — "$0.00 spent", "1.2M tokens" — there is no
+// named quota there, just a figure that would become a tracker title and then go
+// stale. Claude's usage-credits promo does exactly this.
+function isValueOnlyMetricLabel(label) {
+	const text = String(label || '').trim();
+	if (!text) return false;
+	const remainder = text
+		.replace(/\p{Sc}/gu, ' ')
+		.replace(/[\d,.]+\s*(?:k|m|b|thousand|million|billion)?/gi, ' ')
+		.replace(
+			/\b(?:percent|tokens?|credits?|requests?|messages?|words?|spent|used|remaining|left|of|out)\b/gi,
+			' '
+		)
+		.replace(/[^\p{L}]+/gu, ' ')
+		.trim();
+	return remainder === '';
+}
+
+function isValueOnlyLabelPayloadArtifact(payload) {
+	return isValueOnlyMetricLabel(payload?.metricLabel);
+}
+
+// Mirrors isAutoScrapedOpenAiDayArtifact: only removes entries this app scraped
+// itself, never a tracker the user typed in by hand.
+function isAutoScrapedValueOnlyLabelArtifact(model) {
+	if (!isValueOnlyMetricLabel(model?.metricLabel)) return false;
+	const sourceUrl = stableTabUrl(model?.sourceUrl);
+	if (!sourceUrl) return false;
+	try {
+		const evidence = String(model?.description || '').trim().match(/^Scraped from\s+(.+)$/i);
+		const lastUpdatedAt = new Date(model?.lastUpdatedAt);
+		return Boolean(evidence)
+			&& Number.isFinite(lastUpdatedAt.getTime())
+			&& stableTabUrl(evidence[1]) === sourceUrl;
+	} catch (error) {
+		return false;
+	}
+}
+
 function isOpenAiDayPayloadArtifact(payload) {
 	return String(payload?.provider || '').trim().toLowerCase() === 'openai'
 		&& String(payload?.modelName || '').trim().toLowerCase() === 'day'
@@ -283,7 +323,8 @@ function isAutoScrapedOpenAiDayArtifact(model) {
 
 function migrateStoredModels(models) {
 	const source = Array.isArray(models) ? models : [];
-	const migrated = source.filter((model) => !isAutoScrapedOpenAiDayArtifact(model));
+	const migrated = source.filter((model) => !isAutoScrapedOpenAiDayArtifact(model)
+		&& !isAutoScrapedValueOnlyLabelArtifact(model));
 	return { models: migrated, changed: migrated.length !== source.length };
 }
 
@@ -1414,7 +1455,8 @@ function applyScrapedPayloads(payloads) {
 	let models = loadModels();
 	let updatedCount = 0;
 	(Array.isArray(payloads) ? payloads : [])
-		.filter((payload) => !isOpenAiDayPayloadArtifact(payload))
+		.filter((payload) => !isOpenAiDayPayloadArtifact(payload)
+			&& !isValueOnlyLabelPayloadArtifact(payload))
 		.forEach((payload) => {
 			const merged = mergePayloadIntoModels(models, payload);
 			if (merged.updated) {
@@ -1548,7 +1590,10 @@ if (typeof module === 'object' && module.exports) {
 		groupModelsByProvider,
 		groupTrackers,
 		isAutoScrapedOpenAiDayArtifact,
+		isAutoScrapedValueOnlyLabelArtifact,
 		isOpenAiDayPayloadArtifact,
+		isValueOnlyLabelPayloadArtifact,
+		isValueOnlyMetricLabel,
 		isTrackerEnabled,
 		loadModels,
 		loadPreferences,

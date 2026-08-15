@@ -59,6 +59,8 @@ On a typical Claude usage page, a single sync creates three independent trackers
 
 On OpenAI pages, controls such as **Day** are ignored unless they belong to an actual named quota — the date-range buttons are not themselves limits. Manual `Day` trackers and genuine daily limits are preserved.
 
+Blocks whose only nearby text is a figure rather than a name — a promo reading `$0.00 spent`, say — are skipped too, since a tracker titled with a number tells you nothing and goes stale. Trackers you create yourself are never removed, whatever you call them.
+
 Clicking the extension toolbar icon opens the tracker, or focuses its existing tab. It does not scrape into, read from, or write to the clipboard.
 
 ## Supported providers
