@@ -1,6 +1,6 @@
 # Security Policy
 
-This is a browser extension with permission to read pages on `claude.ai` and OpenAI's usage domains, plus a local HTTP server. If you find a way for a malicious page to abuse the extension bridge, exfiltrate scanned data, or otherwise break the boundaries described in the README's [Permissions and safety boundaries](README.md#permissions-and-safety-boundaries) section, please report it privately rather than as a public issue.
+This is a browser extension with permission to read pages on `claude.ai` and OpenAI's usage domains, plus a local HTTP server serving a static dashboard that can also be self-hosted. If you find a way for a malicious page to abuse the extension bridge, exfiltrate scanned data, or otherwise break the boundaries described in the README's [Permissions and safety boundaries](README.md#permissions-and-safety-boundaries) section, please report it privately rather than as a public issue.
 
 ## Reporting
 
@@ -12,6 +12,7 @@ In scope:
 
 - The extension's content-script/background bridge (`chrome-extension/content-script.js`, `chrome-extension/background.js`)
 - The local server's request handling and asset allow-list (`serve.js`)
+- The deployment package's asset allow-list and security headers (`scripts/build-static.js`)
 - Anything that would let a page other than the tracker itself read or influence scanned data
 
 Out of scope:

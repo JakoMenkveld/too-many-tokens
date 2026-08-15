@@ -6,17 +6,19 @@ Know on Tuesday whether you're going to blow through your Claude or ChatGPT week
 
 ## What this is
 
-A local dashboard for tracking LLM usage against session, daily, and weekly limits. A Chrome extension reads the usage pages already open in your signed-in browser, discovers every quota block on each page, and configures the corresponding dashboard entries automatically.
+A browser-only dashboard for tracking LLM usage against session, daily, and weekly limits. A Chrome extension reads the usage pages already open in your signed-in browser, discovers every quota block on each page, and configures the corresponding dashboard entries automatically.
 
-- **Local only.** The tracker runs at `http://localhost:5074`. Configuration and usage data live in the browser's `localStorage`.
-- **No remote service.** There is no backend, no account, and no telemetry. Nothing you scan leaves your machine.
+- **Local by default.** The tracker runs at `http://localhost:5074`. Configuration and usage data live in that origin's browser `localStorage`.
+- **No application backend.** There is no account and no telemetry. Nothing you scan leaves your browser.
 - **No clipboard access.** Scanned values travel only through a request-correlated bridge between the page and the extension.
 
-Use the same `localhost` address every time you reopen the dashboard — browsers keep `localhost` and `127.0.0.1` as separate storage origins even though both reach the same local server.
+The dashboard is a set of static files, so you can also [host your own copy](#deploy-your-own-copy) if you want the same tracker on more than one machine.
+
+Use the same tracker address every time you reopen the dashboard. Browsers isolate `localStorage` by origin, so `localhost`, `127.0.0.1`, and any host you deploy to each have separate tracker data.
 
 ## Requirements
 
-- Node.js 22 or newer.
+- Node.js 22 or newer to run the dashboard locally or build it for deployment.
 - A Chromium-based browser if you want automatic provider-tab scanning.
 
 ## Run
@@ -82,11 +84,29 @@ The extension only asks Chrome for access to those specific sites — not to eve
 
 ## Permissions and safety boundaries
 
-- The page-to-extension bridge accepts messages only from the fixed tracker origins on port `5074` (`localhost` or `127.0.0.1`).
+- The page-to-extension bridge accepts messages only from the tracker origins listed in [`chrome-extension/tracker-origins.js`](chrome-extension/tracker-origins.js) — by default the fixed port-`5074` loopback origins (`localhost` and `127.0.0.1`). Origins are matched exactly, so a lookalike host cannot reach the bridge.
 - Requests and responses carry matching request IDs, allowing overlapping operations to be correlated safely.
 - Invalid requests, unavailable extension contexts, tab failures, and scrape failures return explicit errors rather than silently looking like empty results.
 - Host permissions are limited to the specific providers the scraper supports, not every site you visit — see [Supported providers](#supported-providers). One tab's access being withheld does not stop the others from being scanned.
-- The local Node server binds to loopback and uses a fixed asset allow-list; it is not a general-purpose static file server.
+- The local Node server binds to loopback and uses a fixed asset allow-list; it is not a general-purpose static file server. The deployment package is generated from that same allow-list.
+
+## Deploy your own copy
+
+The dashboard is static files with no backend, so it can be hosted anywhere. Build the deployment package with:
+
+```powershell
+npm run build
+```
+
+The `dist` directory contains only the five public browser assets plus a `staticwebapp.config.json` for Azure Static Web Apps. Both the asset list and the security headers are read directly from `serve.js`, so a deployed copy serves exactly what the local server does, with the same no-store, content-security-policy, permissions-policy, referrer-policy, MIME-sniffing, and frame-denial headers. On a host other than Azure, apply those headers using whatever mechanism it provides.
+
+To let the extension talk to your deployed origin, add it to `TRACKERS` in [`chrome-extension/tracker-origins.js`](chrome-extension/tracker-origins.js), then regenerate the manifest:
+
+```powershell
+npm run sync-manifest
+```
+
+Serve it over HTTPS. The bridge trusts every listed origin, so anything you add there can drive the extension on your machine.
 
 ## Test
 

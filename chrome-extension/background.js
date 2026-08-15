@@ -2,7 +2,7 @@
 
 let scraperApi = globalThis.UsageScraper;
 if (!scraperApi && typeof importScripts === 'function') {
-  importScripts('providers.js', 'scraper.js');
+  importScripts('tracker-origins.js', 'providers.js', 'scraper.js');
   scraperApi = globalThis.UsageScraper;
 }
 if (!scraperApi && typeof require === 'function') {
@@ -10,9 +10,10 @@ if (!scraperApi && typeof require === 'function') {
 }
 const providers = globalThis.UsageProviders
   || (typeof require === 'function' ? require('./providers.js') : null);
+const trackerOrigins = globalThis.TrackerOrigins
+  || (typeof require === 'function' ? require('./tracker-origins.js') : null);
 
-const TRACKER_URL = 'http://localhost:5074/';
-const TRACKER_HOSTS = new Set(['localhost', '127.0.0.1']);
+const TRACKER_URL = trackerOrigins.DEFAULT_TRACKER_URL;
 const RELOAD_TIMEOUT_MS = 12_000;
 const PRE_SNAPSHOT_SETTLE_MS = 150;
 const SNAPSHOT_READINESS_TIMEOUT_MS = 10_000;
@@ -71,12 +72,7 @@ async function collectStablePageSnapshot(options = {}) {
 }
 
 function isTrackerUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === 'http:' && TRACKER_HOSTS.has(url.hostname) && url.port === '5074';
-  } catch (error) {
-    return false;
-  }
+  return trackerOrigins.matchesUrl(value);
 }
 
 function isTrustedTrackerSender(sender) {

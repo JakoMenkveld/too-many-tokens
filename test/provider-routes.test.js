@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { isDiscoverableProviderTab } = require('../chrome-extension/background.js');
 const { tabSelectionProviderKey } = require('../app.js');
 const providers = require('../chrome-extension/providers.js');
+const trackerOrigins = require('../chrome-extension/tracker-origins.js');
 
 // Add every URL you can think of. Records ACTUAL current behaviour, not desired behaviour.
 const CASES = [
@@ -31,4 +32,9 @@ test('provider route recognition is consistent between discovery and settings pe
 test('manifest host_permissions match the provider registry', () => {
   const manifest = require('../chrome-extension/manifest.json');
   assert.deepEqual([...manifest.host_permissions].sort(), providers.allOrigins());
+});
+
+test('manifest content-script matches track the trusted tracker origins', () => {
+  const manifest = require('../chrome-extension/manifest.json');
+  assert.deepEqual(manifest.content_scripts[0].matches, trackerOrigins.allMatchPatterns());
 });

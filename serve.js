@@ -172,5 +172,7 @@ if (require.main === module) {
 module.exports = {
 	createStaticServer,
 	DEFAULT_HOST,
-	DEFAULT_PORT
+	DEFAULT_PORT,
+	PUBLIC_ASSETS,
+	SECURITY_HEADERS
 };

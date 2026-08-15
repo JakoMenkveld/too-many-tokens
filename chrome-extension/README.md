@@ -1,6 +1,8 @@
 # Chrome Extension for Too Many Tokens
 
-This Manifest V3 extension connects the local dashboard at `http://localhost:5074` to provider usage pages already open in Chrome. It discovers tabs, scans only the tabs selected in the tracker, and returns one normalized payload for every visible quota block.
+This Manifest V3 extension connects the dashboard at `http://localhost:5074` to provider usage pages already open in Chrome. It discovers tabs, scans only the tabs selected in the tracker, and returns one normalized payload for every visible quota block.
+
+The dashboard origins it will talk to are listed in `tracker-origins.js`; see the main README's [Deploy your own copy](../README.md#deploy-your-own-copy) if you host the dashboard somewhere else.
 
 ## Install
 
@@ -27,7 +29,7 @@ The extension toolbar button is a tracker launcher. It focuses an existing track
 ## How communication works
 
 1. `app.js` creates a request ID and posts a list-tabs or scan-selected-tabs request.
-2. `content-script.js` accepts the request only from the tracker window and a fixed port-`5074` tracker origin (`localhost` or `127.0.0.1`).
+2. `content-script.js` accepts the request only from the tracker window. Chrome injects it only at the tracker origins listed in `tracker-origins.js` — by default the port-`5074` loopback origins.
 3. The content script retains the request ID for correlation and forwards the requested operation to `background.js`.
 4. The service worker lists scannable tabs or reloads each selected tab, revalidates its URL, waits for fresh content, and runs the scraper.
 5. The response returns through the same bridge with the matching request ID.
@@ -53,9 +55,9 @@ The tracker uses reset information to derive the current hour within a cycle whe
 
 - `scripting` is required to execute the scraper in tabs the user selects. Tab discovery uses `chrome.tabs.query`, which returns full `url`/`title` for tabs already covered by a host permission below, without needing the broader `tabs` permission.
 - Host permissions are limited to the specific providers the scraper supports (`claude.ai`, `chatgpt.com`, `*.openai.com`), generated from `chrome-extension/providers.js` via `npm run sync-manifest` — not a wildcard over arbitrary origins. Data is processed locally.
-- The content bridge is injected only for the tracker origin and validates both message source and origin.
+- The content bridge is injected only for the fixed tracker origins generated into the manifest from `tracker-origins.js`, and validates both message source and origin.
 - Internal browser pages and the tracker tab are not offered as provider scan targets.
-- The extension does not persist scan results; tracker entries remain in the page's browser `localStorage` and no remote backend is used.
+- The extension does not persist scan results; tracker entries remain in the page's browser `localStorage` and no application backend is used.
 
 ## Test changes
 

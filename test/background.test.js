@@ -16,6 +16,7 @@ const {
   scanTab,
   scanTabIds
 } = require('../chrome-extension/background.js');
+const trackerOrigins = require('../chrome-extension/tracker-origins.js');
 
 const FAST_SCAN_OPTIONS = {
   settleMs: 0,
@@ -36,12 +37,28 @@ function createTabUpdatedEvent() {
   };
 }
 
-test('only the exact local tracker origin is trusted', () => {
+// Derived from the tracker-origins registry rather than hard-coded, so a deployment
+// that adds its own hosted origin does not have to edit this test.
+test('every registered tracker origin is trusted, on any path', () => {
+  assert.ok(trackerOrigins.TRACKERS.length > 0);
+  for (const { url } of trackerOrigins.TRACKERS) {
+    assert.equal(isTrackerUrl(url), true);
+    assert.equal(isTrackerUrl(new URL('/setup', url).href), true);
+    assert.equal(isTrustedTrackerSender({ tab: { url } }), true);
+  }
+});
+
+test('the loopback tracker origins are always trusted', () => {
   assert.equal(isTrackerUrl('http://localhost:5074/'), true);
   assert.equal(isTrackerUrl('http://127.0.0.1:5074/path'), true);
+});
+
+test('near-miss tracker origins are rejected', () => {
   assert.equal(isTrackerUrl('http://localhost:9999/'), false);
   assert.equal(isTrackerUrl('https://localhost:5074/'), false);
-  assert.equal(isTrustedTrackerSender({ tab: { url: 'http://localhost:5074/' } }), true);
+  assert.equal(isTrackerUrl('http://localhost.evil.example:5074/'), false);
+  assert.equal(isTrackerUrl('https://evil.example/?x=http://localhost:5074/'), false);
+  assert.equal(isTrackerUrl('not a url'), false);
   assert.equal(isTrustedTrackerSender({ tab: { url: 'http://localhost:8080/' } }), false);
 });
 
