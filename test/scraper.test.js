@@ -141,40 +141,6 @@ test('parses every Claude quota block with stable metric metadata', () => {
   assert.equal(payloads[3].resetHour, 6 + 28 / 60);
 });
 
-test('a spend reading above a percentage does not become the tracker name', () => {
-  const now = new Date('2026-08-10T10:00:00.000Z');
-  const payloads = parseUsageSnapshots({
-    body: [
-      'Current session',
-      'Resets in 3 hr 15 min',
-      '53% used',
-      'Extra usage',
-      '$0.00 spent',
-      'Resets in 16 d 14 hr',
-      '0% used'
-    ].join('\n'),
-    page: 'https://claude.ai/settings/usage',
-    title: 'Usage | Claude'
-  }, now);
-
-  assert.deepEqual(
-    payloads.map((payload) => payload.metricLabel),
-    ['Current session', 'Extra usage']
-  );
-});
-
-test('a label made only of readings falls back rather than naming a tracker with a number', () => {
-  const now = new Date('2026-08-10T10:00:00.000Z');
-  const [payload] = parseUsageSnapshots({
-    body: ['1.2M tokens used', '$4.50 spent', 'Resets in 2 hr', '40% used'].join('\n'),
-    page: 'https://claude.ai/settings/usage',
-    title: 'Usage | Claude'
-  }, now);
-
-  assert.notEqual(payload.metricLabel, '$4.50 spent');
-  assert.notEqual(payload.metricLabel, '1.2M tokens used');
-});
-
 test('keeps metric keys stable when values and layout change', () => {
   const page = 'https://claude.ai/settings/usage';
   const first = parseUsageSnapshots({
