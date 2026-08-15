@@ -55,9 +55,9 @@ See [chrome-extension/README.md](chrome-extension/README.md) for permissions, co
 4. Open **Setup** to select provider tabs, choose an auto-sync refresh interval, and show or hide individual readings. These choices survive hard refreshes and page closes; auto-sync resumes when the dashboard opens again.
 5. Use **Manual Overrides** only when a provider changes its wording or you want a custom tracker.
 
-For the Claude layout shown in the project requirements, a single sync creates three independent trackers: the five-hour current session, the all-model weekly limit, and the named-model weekly limit. Text such as `82% remaining` is stored and displayed as `18% used`.
+On a typical Claude usage page, a single sync creates three independent trackers: the five-hour current session, the all-model weekly limit, and the named-model weekly limit. Text such as `82% remaining` is stored and displayed as `18% used`.
 
-OpenAI page controls such as **Day** are ignored unless they are part of an actual named quota. Older auto-scraped `OpenAI · Day` artifacts created by the previous parser are removed narrowly on load; manual `Day` trackers and genuine daily limits are preserved.
+On OpenAI pages, controls such as **Day** are ignored unless they belong to an actual named quota — the date-range buttons are not themselves limits. Manual `Day` trackers and genuine daily limits are preserved.
 
 Clicking the extension toolbar icon opens the tracker, or focuses its existing tab. It does not scrape into, read from, or write to the clipboard.
 
