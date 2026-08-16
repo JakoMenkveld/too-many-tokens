@@ -4,9 +4,45 @@ Know on Tuesday whether you're going to blow through your Claude or ChatGPT week
 
 ![Too Many Tokens overview](assets/screenshot.png)
 
+> ## Read this before you install it
+>
+> **This tool works in a way that Anthropic's and OpenAI's terms prohibit.** It is
+> published for personal use, and using it may put your provider account at risk.
+> That is your decision to make, and you should make it deliberately.
+>
+> To read your quota numbers, the extension **reloads your provider usage page and
+> then reads the rendered text**. It does not passively observe a page you loaded
+> yourself — it issues the page load itself, from a script, and repeats it on a
+> timer when auto-sync is on.
+>
+> Both providers prohibit exactly that:
+>
+> - **Anthropic** ([Consumer Terms](https://www.anthropic.com/legal/consumer-terms), §3) — you must not "crawl, scrape, or otherwise harvest data or information from our Services other than as permitted under these Terms," nor, "[e]xcept when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit it, ... access the Services through automated or non-human means, whether through a bot, script, or otherwise."
+> - **OpenAI** ([Terms of Use](https://openai.com/policies/row-terms-of-use/), "What you cannot do") — you must not "[a]utomatically or programmatically extract data or Output."
+>
+> Terms change. Read the current versions yourself rather than trusting the quotes
+> above, and satisfy yourself before you install this.
+>
+> **For balance, here is what it does not do.** It uses no API keys and no private
+> or undocumented endpoints. It never handles your credentials — it reads a session
+> you signed into yourself. It does not bypass authentication, captchas, paywalls,
+> or rate limits, and it cannot help you exceed a quota; it only reports one. It
+> reads no other user's data, sends nothing off your machine, and stores everything
+> in your own browser. The conflict is with the automated-access clauses, not with
+> the abuse or security clauses.
+>
+> **Auto-sync is off by default**, and nothing is read until you ask for it. When
+> you do turn it on, the shortest interval is 5 minutes; see
+> [Auto-sync and request volume](#auto-sync-and-request-volume).
+>
+> Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. "Claude"
+> and "ChatGPT" are their respective owners' trademarks, used here only to say what
+> this reads. Provided as-is under the [MIT License](LICENSE), without warranty —
+> including no warranty that using it is consistent with any provider's terms.
+
 ## What this is
 
-A browser-only dashboard for tracking LLM usage against session, daily, and weekly limits. A Chrome extension reads the usage pages already open in your signed-in browser, discovers every quota block on each page, and configures the corresponding dashboard entries automatically.
+A browser-only dashboard for tracking LLM usage against session, daily, and weekly limits. A Chrome extension reloads the usage pages open in your signed-in browser, reads the rendered text, discovers every quota block on each page, and configures the corresponding dashboard entries automatically — see [the terms warning above](#read-this-before-you-install-it) for what that means for your provider account.
 
 - **Local by default.** The tracker runs at `http://localhost:5074`. Configuration and usage data live in that origin's browser `localStorage`.
 - **No application backend.** There is no account and no telemetry. Nothing you scan leaves your browser.
@@ -123,7 +159,33 @@ npm run check
 
 Provider usage pages are not standardized and can change without notice. The scraper uses text and metadata heuristics, so a scan can occasionally require a correction. Manual setup remains available as a collapsed fallback; it is not required for recognized session, daily, or weekly layouts.
 
-Scraping a provider's usage page may sit awkwardly with that provider's terms of service. This tool only reads pages you are already signed into, locally, and sends nothing anywhere — but whether that's fine for your account is a call you should make yourself.
+## Auto-sync and request volume
+
+Every sync **reloads** the selected provider tab and then reads it. That is a real
+page load against the provider, so the interval is a request-volume decision, not
+just a freshness one.
+
+- Auto-sync is **off by default**. Left alone, this tool reads a provider page only
+  when you press Sync.
+- With auto-sync on, the interval floor is **5 minutes** and the default is
+  **15 minutes** — roughly 96 reloads a day per tab. Intervals shorter than the
+  floor are clamped up when preferences load, so a setting saved by an older
+  version cannot keep polling faster.
+- The ceiling is 60 minutes. The control only lets you go slower, never faster.
+
+Quota figures move slowly. A tighter interval costs the provider real requests and
+tells you nothing you would not learn a few minutes later.
+
+If you want the lowest-footprint setup, leave auto-sync off and press Sync when you
+actually want to know.
+
+## Provider terms
+
+See [Read this before you install it](#read-this-before-you-install-it) at the top.
+In short: the extension reloads and reads your provider usage pages, both Anthropic
+and OpenAI prohibit automated access and programmatic extraction, and using this may
+put your account at risk. Nothing here is legal advice — read the providers' current
+terms and decide for yourself.
 
 ## Contributing
 

@@ -168,7 +168,7 @@ test('legacy URL preferences migrate to provider-scoped descriptors without tab 
   assert.deepEqual(saved, {
     schemaVersion: 5,
     autoSyncEnabled: true,
-    autoSyncIntervalSeconds: 30,
+    autoSyncIntervalSeconds: 900,
     overviewPaceView: 'bars',
     showHeadlineIndicator: true,
     headlineScope: 'overall',
@@ -197,7 +197,7 @@ test('invalid or future preference shapes fall back safely', () => {
   assert.deepEqual(loadPreferences(invalid), {
     schemaVersion: 5,
     autoSyncEnabled: false,
-    autoSyncIntervalSeconds: 30,
+    autoSyncIntervalSeconds: 900,
     overviewPaceView: 'bars',
     showHeadlineIndicator: true,
     headlineScope: 'overall',
@@ -377,22 +377,33 @@ test('auto-sync interval preferences migrate, clamp, and format consistently', (
   const saved = savePreferences({
     schemaVersion: 4,
     autoSyncEnabled: true,
-    autoSyncIntervalSeconds: 120,
+    autoSyncIntervalSeconds: 1800,
     providerTabs: { initialized: false, selectedTabs: [] }
   }, storage);
 
-  assert.equal(saved.autoSyncIntervalSeconds, 120);
-  assert.equal(loadPreferences(storage).autoSyncIntervalSeconds, 120);
-  assert.equal(formatAutoSyncInterval(30), '30s');
-  assert.equal(formatAutoSyncInterval(120), '2m');
-  assert.equal(formatAutoSyncInterval(5), '30s');
-  assert.equal(formatAutoSyncInterval(7200), '15m');
-  assert.equal(autoSyncIntervalMilliseconds(120), 120000);
+  assert.equal(saved.autoSyncIntervalSeconds, 1800);
+  assert.equal(loadPreferences(storage).autoSyncIntervalSeconds, 1800);
+
+  // Every sync reloads a provider page, so the interval only ever clamps
+  // toward less frequent. A stored 30s from before the floor existed migrates
+  // up to 5m on load rather than continuing to hammer the provider.
+  assert.equal(formatAutoSyncInterval(30), '5m');
+  assert.equal(formatAutoSyncInterval(120), '5m');
+  assert.equal(formatAutoSyncInterval(5), '5m');
+  assert.equal(formatAutoSyncInterval(900), '15m');
+  assert.equal(formatAutoSyncInterval(7200), '60m');
+  assert.equal(autoSyncIntervalMilliseconds(30), 300000);
+  assert.equal(autoSyncIntervalMilliseconds(1800), 1800000);
+  assert.equal(
+    savePreferences({ schemaVersion: 4, autoSyncIntervalSeconds: 30 }, createStorage()).autoSyncIntervalSeconds,
+    300
+  );
   const setup = renderPage('setup', [], []);
   assert.match(setup, /data-auto-sync-interval/);
   assert.match(setup, /Auto-sync interval/);
-  assert.match(setup, /<option value="30" selected>30s<\/option>/);
-  assert.match(setup, /Auto-Sync Every 30s/);
+  assert.match(setup, /<option value="900" selected>15m<\/option>/);
+  assert.match(setup, /Auto-Sync Every 15m/);
+  assert.doesNotMatch(setup, /<option value="(?:30|60|120)"/);
 });
 
 function headlineFixture() {

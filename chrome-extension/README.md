@@ -4,6 +4,8 @@ This Manifest V3 extension connects the dashboard at `http://localhost:5074` to 
 
 The dashboard origins it will talk to are listed in `tracker-origins.js`; see the main README's [Deploy your own copy](../README.md#deploy-your-own-copy) if you host the dashboard somewhere else.
 
+> **Terms warning.** Scanning **reloads** the provider tab (`chrome.tabs.reload`) and then injects a reader that harvests the rendered text (`chrome.scripting.executeScript`). Anthropic and OpenAI both prohibit automated access to and programmatic extraction from their services, so running this may put your provider account at risk. Read [the disclaimer in the main README](../README.md#read-this-before-you-install-it) before you load the extension.
+
 ## Install
 
 1. Start the tracker from the repository root with `npm start`.

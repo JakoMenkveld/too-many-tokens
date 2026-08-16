@@ -5,9 +5,15 @@ const PREFERENCES_STORAGE_KEY = 'llmRunRateTracker.preferences';
 const PREFERENCES_SCHEMA_VERSION = 5;
 const LEGACY_PREFERENCES_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4]);
 const EXTENSION_BRIDGE_CHANNEL = 'llm-run-rate-tracker';
-const DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 30;
-const MIN_AUTO_SYNC_INTERVAL_SECONDS = 30;
-const MAX_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60;
+// Each sync reloads the provider's page. A 30-second floor meant ~2,880 page
+// loads per tab per day, which is indistinguishable from a bot hammering the
+// site; quota figures move far too slowly for that to buy anything. The floor
+// is 5 minutes and the ceiling allows going slower still, never faster.
+// Stored intervals below the floor are clamped up on load, so existing
+// preferences migrate without a schema bump.
+const DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60;
+const MIN_AUTO_SYNC_INTERVAL_SECONDS = 5 * 60;
+const MAX_AUTO_SYNC_INTERVAL_SECONDS = 60 * 60;
 const SCAN_REQUEST_TIMEOUT_MS = 45_000;
 const CHART_COLORS = ['violet', 'cyan', 'mint', 'amber', 'rose', 'blue'];
 const PAGE_CONFIG = Object.freeze({
@@ -1272,7 +1278,7 @@ function renderSourcesPanel() {
 			<div class="sync-toolbar">
 				<div class="sync-status"><span class="sync-orb ${scanInProgress || tabDiscoveryInProgress ? 'spinning' : ''}">${icon('refresh')}</span><p>${escapeHtml(autoScanStatus)}</p></div>
 				<div class="control-row">
-					<label class="sync-interval"><span>Auto-sync interval</span><select data-auto-sync-interval aria-label="Auto-sync refresh interval">${[30, 60, 120, 300, 600, 900].map((seconds) => `<option value="${seconds}" ${seconds === autoSyncInterval ? 'selected' : ''}>${escapeHtml(formatAutoSyncInterval(seconds))}</option>`).join('')}</select></label>
+					<label class="sync-interval"><span>Auto-sync interval</span><select data-auto-sync-interval aria-label="Auto-sync refresh interval">${[300, 600, 900, 1800, 3600].map((seconds) => `<option value="${seconds}" ${seconds === autoSyncInterval ? 'selected' : ''}>${escapeHtml(formatAutoSyncInterval(seconds))}</option>`).join('')}</select></label>
 					<button class="secondary" data-action="refresh-tabs" ${scanInProgress || tabDiscoveryInProgress ? 'disabled' : ''}>Refresh Tabs</button>
 					<button data-action="scan-selected" ${!selectedTabIds.length || scanInProgress || tabDiscoveryInProgress ? 'disabled' : ''}>${scanInProgress ? 'Refreshing…' : 'Scan Selected'}</button>
 					<button class="secondary" data-action="toggle-auto" ${!selectedTabIds.length && !autoSyncEnabled ? 'disabled' : ''}>${autoSyncEnabled ? 'Stop Auto-Sync' : `Auto-Sync Every ${escapeHtml(autoSyncIntervalLabel)}`}</button>
