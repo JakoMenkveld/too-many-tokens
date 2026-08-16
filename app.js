@@ -629,9 +629,13 @@ function resolveHeadlineScope(models, scope = preferences.headlineScope) {
 	};
 }
 
-function headlinePaceContext(models, value = preferences) {
+// The Overview panel is always the overall average -- it sits above every
+// tracker on the page, so narrowing it to one of them would misrepresent what
+// the reader is looking at. Only the browser tab title, which has room for a
+// single number and is read while the page is not visible, follows the scope.
+function headlinePaceContext(models, value = preferences, { scoped = true } = {}) {
 	const settings = sanitizePreferences(value);
-	const scope = resolveHeadlineScope(models, settings.headlineScope);
+	const scope = resolveHeadlineScope(models, scoped ? settings.headlineScope : DEFAULT_HEADLINE_SCOPE);
 	const summary = overallPaceSummary(scope.models);
 	return {
 		enabled: settings.showHeadlineIndicator,
@@ -918,7 +922,7 @@ function headlineScopeCaption(headline) {
 }
 
 function renderHeadlinePanel(models) {
-	const headline = headlinePaceContext(models);
+	const headline = headlinePaceContext(models, preferences, { scoped: false });
 	if (!headline.available) return '';
 	const { delta, summary, scope } = headline;
 	const idealMarker = clamp(summary.ideal * 100, 1, 99);
@@ -1341,13 +1345,13 @@ function renderHeadlineSettings(enabledModels) {
 			</div>
 			<div class="tracker-control ${enabled ? '' : 'is-hidden'}">
 				<div class="tracker-control-identity">
-					<strong>Headline source</strong>
+					<strong>Browser tab title</strong>
 					<span>${fellBack
-						? 'The saved selection is no longer available — falling back to Overall'
-						: 'Which quota the headline number averages'}</span>
+						? 'The saved selection is no longer available — the title is falling back to Overall'
+						: 'Which quota the title shows. The Overview panel always averages them all.'}</span>
 				</div>
 				<label class="headline-scope">
-					<span class="visually-hidden">Headline indicator source</span>
+					<span class="visually-hidden">Browser tab title source</span>
 					<select data-headline-scope ${enabled ? '' : 'disabled'}>
 						${option(options.overall)}
 						${options.providers.length ? `<optgroup label="Provider">${options.providers.map(option).join('')}</optgroup>` : ''}

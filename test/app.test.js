@@ -525,6 +525,31 @@ test('the headline panel renders on Overview and hides when switched off', () =>
   assert.match(setup, /<optgroup label="Provider">/);
 });
 
+test('the scope selector moves the title only — the Overview panel stays overall', () => {
+  const models = headlineFixture();
+  const scoped = {
+    schemaVersion: 5,
+    showHeadlineIndicator: true,
+    headlineScope: 'tracker:session'
+  };
+
+  // Same preferences, two readings: the title narrows, the panel does not.
+  assert.equal(documentTitle(models, scoped), '+40% — Too Many Tokens');
+  assert.equal(headlinePaceContext(models, scoped).scope.scope, 'tracker:session');
+  assert.equal(headlinePaceContext(models, scoped, { scoped: false }).scope.scope, 'overall');
+  assert.equal(headlinePaceContext(models, scoped, { scoped: false }).summary.count, 3);
+  assert.equal(headlinePaceContext(models, scoped, { scoped: false }).delta.shortLabel, '+10%');
+
+  const panel = renderHeadlinePanel(models);
+  assert.match(panel, /headline-eyebrow">Overall</);
+  assert.match(panel, /headline-delta warning">\+10%/);
+  assert.doesNotMatch(panel, /\+40%/);
+  assert.match(panel, /Every shown tracker, weighted by cycle length/);
+
+  // The switch still governs both surfaces together.
+  assert.equal(documentTitle(models, { ...scoped, showHeadlineIndicator: false }), 'Too Many Tokens');
+});
+
 test('the header reports the auto-sync countdown and how stale the numbers are', () => {
   assert.equal(formatSyncCountdown(0), '0s');
   assert.equal(formatSyncCountdown(-5000), '0s');
