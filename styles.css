@@ -60,7 +60,7 @@ a {
 
 .app-shell {
 	display: grid;
-	grid-template-columns: 238px minmax(0, 1fr);
+	grid-template-columns: 272px minmax(0, 1fr);
 	min-height: 100vh;
 }
 
@@ -69,7 +69,7 @@ a {
 	inset: 0 auto 0 0;
 	z-index: 20;
 	display: flex;
-	width: 238px;
+	width: 272px;
 	flex-direction: column;
 	padding: 26px 18px 22px;
 	border-right: 1px solid var(--border-soft);
@@ -96,7 +96,7 @@ a {
 	background: linear-gradient(145deg, rgba(139, 127, 255, 0.28), rgba(75, 199, 234, 0.1));
 	box-shadow: 0 8px 28px rgba(79, 63, 205, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 	color: #dcd8ff;
-	font-size: 0.72rem;
+	font-size: 0.92rem;
 	font-weight: 800;
 }
 
@@ -114,7 +114,7 @@ a {
 }
 
 .brand strong {
-	font-size: 0.98rem;
+	font-size: 1.25rem;
 	letter-spacing: -0.01em;
 }
 
@@ -133,7 +133,7 @@ a {
 	border: 1px solid transparent;
 	border-radius: 11px;
 	color: var(--muted);
-	font-size: 0.88rem;
+	font-size: 1.13rem;
 	font-weight: 650;
 	text-decoration: none;
 	transition: 150ms ease;
@@ -265,7 +265,7 @@ button {
 	box-shadow: 0 8px 22px rgba(73, 58, 184, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.18);
 	color: #fff;
 	cursor: pointer;
-	font-size: 0.8rem;
+	font-size: 1.02rem;
 	font-weight: 720;
 	transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease, background 140ms ease;
 }
@@ -294,7 +294,7 @@ button.secondary:hover:not(:disabled) {
 button.compact {
 	min-height: 34px;
 	padding: 7px 12px;
-	font-size: 0.74rem;
+	font-size: 0.95rem;
 }
 
 button .button-icon {
@@ -343,7 +343,7 @@ select:focus-visible {
 	border-radius: 999px;
 	background: rgba(17, 22, 36, 0.76);
 	color: var(--muted);
-	font-size: 0.7rem;
+	font-size: 0.9rem;
 	font-weight: 700;
 }
 
@@ -377,7 +377,7 @@ select:focus-visible {
 	border-left: 1px solid rgba(133, 148, 175, 0.22);
 	margin-left: 2px;
 	color: #9aa5bb;
-	font-size: 0.66rem;
+	font-size: 0.84rem;
 	font-style: normal;
 	font-variant-numeric: tabular-nums;
 	font-weight: 700;
@@ -440,7 +440,7 @@ select:focus-visible {
 .panel-heading h2,
 .section-heading h2 {
 	margin: 0;
-	font-size: 1rem;
+	font-size: 1.28rem;
 	font-weight: 700;
 	letter-spacing: -0.018em;
 }
@@ -450,7 +450,7 @@ select:focus-visible {
 	flex-wrap: wrap;
 	gap: 13px;
 	color: var(--muted);
-	font-size: 0.63rem;
+	font-size: 0.81rem;
 }
 
 .chart-legend span {
@@ -495,7 +495,7 @@ select:focus-visible {
 	background: transparent;
 	box-shadow: none;
 	color: var(--muted);
-	font-size: 0.65rem;
+	font-size: 0.83rem;
 }
 
 .pace-view-toggle button.active {
@@ -536,14 +536,14 @@ select:focus-visible {
 .pace-curve-header strong {
 	overflow: hidden;
 	color: #e3e7f0;
-	font-size: 0.74rem;
+	font-size: 0.95rem;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
 .pace-curve-header span {
 	color: #6f7b91;
-	font-size: 0.57rem;
+	font-size: 0.73rem;
 }
 
 .pace-curve-header dl {
@@ -561,14 +561,14 @@ select:focus-visible {
 
 .pace-curve-header dt {
 	color: #68758b;
-	font-size: 0.49rem;
+	font-size: 0.72rem;
 	font-weight: 680;
 }
 
 .pace-curve-header dd {
 	margin-top: 2px;
 	color: #dce1eb;
-	font-size: 0.67rem;
+	font-size: 0.86rem;
 	font-weight: 720;
 }
 
@@ -580,7 +580,7 @@ select:focus-visible {
 	display: block;
 	margin-top: 2px;
 	color: #68758b;
-	font-size: 0.46rem;
+	font-size: 0.72rem;
 	font-style: normal;
 	font-weight: 620;
 	white-space: nowrap;
@@ -613,7 +613,7 @@ select:focus-visible {
 
 .pace-curve-axis {
 	fill: #68758b;
-	font-size: 7px;
+	font-size: 9px;
 }
 
 .pace-curve-ideal {
@@ -647,7 +647,7 @@ select:focus-visible {
 .runway-intro {
 	margin: 4px 0 0;
 	color: var(--muted);
-	font-size: 0.62rem;
+	font-size: 0.79rem;
 }
 
 .runway-legend {
@@ -656,7 +656,7 @@ select:focus-visible {
 	justify-content: flex-end;
 	gap: 8px 12px;
 	color: var(--muted);
-	font-size: 0.56rem;
+	font-size: 0.72rem;
 }
 
 .runway-legend span {
@@ -709,14 +709,14 @@ select:focus-visible {
 .runway-card-header strong {
 	overflow: hidden;
 	color: #e3e7f0;
-	font-size: 0.72rem;
+	font-size: 0.92rem;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
 .runway-card-header > div > span {
 	color: #6f7b91;
-	font-size: 0.56rem;
+	font-size: 0.72rem;
 }
 
 .runway-outcome {
@@ -727,7 +727,7 @@ select:focus-visible {
 	padding: 5px 8px;
 	border: 1px solid var(--border-soft);
 	border-radius: 999px;
-	font-size: 0.55rem;
+	font-size: 0.72rem;
 	font-weight: 720;
 	white-space: nowrap;
 }
@@ -1125,7 +1125,7 @@ select:focus-visible {
 	justify-content: space-between;
 	color: rgba(183, 224, 235, 0.62);
 	font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-	font-size: 0.49rem;
+	font-size: 0.72rem;
 	font-weight: 720;
 	letter-spacing: 0.12em;
 }
@@ -1144,7 +1144,7 @@ select:focus-visible {
 .runway-card-footer p {
 	margin: 0;
 	color: #8793a9;
-	font-size: 0.6rem;
+	font-size: 0.77rem;
 	line-height: 1.45;
 }
 
@@ -1157,14 +1157,14 @@ select:focus-visible {
 
 .runway-card-footer dt {
 	color: #68758b;
-	font-size: 0.48rem;
+	font-size: 0.72rem;
 	font-weight: 680;
 }
 
 .runway-card-footer dd {
 	margin: 3px 0 0;
 	color: #dce1eb;
-	font-size: 0.65rem;
+	font-size: 0.83rem;
 	font-weight: 720;
 	white-space: nowrap;
 }
@@ -1173,7 +1173,7 @@ select:focus-visible {
 	display: block;
 	margin-top: 2px;
 	color: #707d93;
-	font-size: 0.48rem;
+	font-size: 0.72rem;
 	font-style: normal;
 	font-weight: 650;
 }
@@ -1279,7 +1279,7 @@ select:focus-visible {
 
 .pace-row {
 	display: grid;
-	grid-template-columns: minmax(135px, 1fr) minmax(120px, 1.25fr) minmax(290px, 1.35fr);
+	grid-template-columns: minmax(190px, 1.4fr) minmax(110px, 1fr) minmax(300px, 1.25fr);
 	gap: 18px;
 	align-items: center;
 	min-width: 0;
@@ -1300,18 +1300,17 @@ select:focus-visible {
 .pace-identity strong {
 	overflow: hidden;
 	color: #dce1eb;
-	font-size: 0.73rem;
+	font-size: 0.93rem;
 	font-weight: 680;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
+/* At the larger type scale this line no longer fits on one row, and it ends in
+   the reset countdown -- the part worth reading. Wrap it rather than clipping. */
 .pace-identity span {
-	overflow: hidden;
 	color: #69758a;
-	font-size: 0.57rem;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	font-size: 0.73rem;
 }
 
 .pace-row-track {
@@ -1335,14 +1334,14 @@ select:focus-visible {
 .pace-row-metrics small {
 	margin-bottom: 3px;
 	color: #69758a;
-	font-size: 0.49rem;
+	font-size: 0.72rem;
 	font-weight: 680;
 	white-space: nowrap;
 }
 
 .pace-row-metrics strong {
 	color: #dce1eb;
-	font-size: 0.68rem;
+	font-size: 0.87rem;
 	font-weight: 720;
 	white-space: nowrap;
 }
@@ -1371,16 +1370,20 @@ select:focus-visible {
 		white-space: normal;
 	}
 
+	/* Four columns in a phone-width container leaves ~80px each, which the
+	   larger type no longer fits -- "Projected depletion" ran off the edge. */
 	.pace-row-metrics {
-		gap: 16px;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 14px 16px;
 	}
 
 	.pace-row-metrics small {
-		font-size: 0.53rem;
+		font-size: 0.72rem;
+		white-space: normal;
 	}
 
 	.pace-row-metrics strong {
-		font-size: 0.76rem;
+		font-size: 0.97rem;
 	}
 }
 
@@ -1402,7 +1405,7 @@ select:focus-visible {
 
 .axis-label {
 	fill: #667289;
-	font-size: 9px;
+	font-size: 11px;
 }
 
 .trend-chart .trend-line {
@@ -1425,7 +1428,7 @@ select:focus-visible {
 	border: 1px solid var(--border-soft);
 	border-radius: 999px;
 	color: var(--muted);
-	font-size: 0.58rem;
+	font-size: 0.74rem;
 	white-space: nowrap;
 }
 
@@ -1449,7 +1452,7 @@ select:focus-visible {
 .trend-provider-summary > h3 {
 	margin: 5px 0 0;
 	color: #8793aa;
-	font-size: 0.62rem;
+	font-size: 0.79rem;
 	font-weight: 740;
 	letter-spacing: 0.07em;
 	text-transform: uppercase;
@@ -1482,7 +1485,7 @@ select:focus-visible {
 .trend-summary-metric strong {
 	overflow: hidden;
 	color: #dce1eb;
-	font-size: 0.66rem;
+	font-size: 0.84rem;
 	font-weight: 680;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -1510,14 +1513,14 @@ select:focus-visible {
 
 .trend-summary-row dt {
 	color: #68758c;
-	font-size: 0.48rem;
+	font-size: 0.72rem;
 	font-weight: 680;
 }
 
 .trend-summary-row dd {
 	margin: 0;
 	color: #dce1eb;
-	font-size: 0.65rem;
+	font-size: 0.83rem;
 	font-weight: 720;
 	white-space: nowrap;
 }
@@ -1535,7 +1538,7 @@ select:focus-visible {
 	border: 1px solid rgba(240, 113, 140, 0.24);
 	border-radius: 4px;
 	color: #f3b2c0;
-	font-size: 0.43rem;
+	font-size: 0.72rem;
 	font-weight: 700;
 	letter-spacing: 0.02em;
 }
@@ -1589,7 +1592,7 @@ select:focus-visible {
 	border: 1px solid rgba(255, 255, 255, 0.1);
 	border-radius: 10px;
 	color: #fff;
-	font-size: 0.67rem;
+	font-size: 0.86rem;
 	font-weight: 800;
 	letter-spacing: 0.03em;
 }
@@ -1605,12 +1608,12 @@ select:focus-visible {
 .quota-identity p {
 	margin-bottom: 3px;
 	color: var(--muted);
-	font-size: 0.63rem;
+	font-size: 0.81rem;
 	font-weight: 650;
 }
 
 .quota-identity h3 {
-	font-size: 0.92rem;
+	font-size: 1.18rem;
 	font-weight: 700;
 }
 
@@ -1641,7 +1644,7 @@ select:focus-visible {
 .headline-eyebrow {
 	overflow: hidden;
 	color: var(--muted);
-	font-size: 0.66rem;
+	font-size: 0.84rem;
 	font-weight: 700;
 	letter-spacing: 0.04em;
 	text-overflow: ellipsis;
@@ -1666,14 +1669,14 @@ select:focus-visible {
 	gap: 3px;
 	margin: 0;
 	color: #cbd2e0;
-	font-size: 0.7rem;
+	font-size: 0.9rem;
 	font-weight: 650;
 	text-align: right;
 }
 
 .headline-note span {
 	color: var(--muted);
-	font-size: 0.6rem;
+	font-size: 0.77rem;
 	font-weight: 600;
 }
 
@@ -1701,7 +1704,7 @@ select:focus-visible {
 
 .headline-metrics dt {
 	color: var(--muted);
-	font-size: 0.58rem;
+	font-size: 0.74rem;
 	font-weight: 660;
 	letter-spacing: 0.03em;
 	text-transform: uppercase;
@@ -1710,7 +1713,7 @@ select:focus-visible {
 .headline-metrics dd {
 	margin: 0;
 	color: #dce1eb;
-	font-size: 0.78rem;
+	font-size: 1rem;
 	font-variant-numeric: tabular-nums;
 	font-weight: 720;
 }
@@ -1730,7 +1733,7 @@ select:focus-visible {
 	border-radius: 9px;
 	background: #0d1220;
 	color: #e8ebf2;
-	font-size: 0.68rem;
+	font-size: 0.87rem;
 }
 
 .headline-scope select:disabled {
@@ -1770,7 +1773,7 @@ select:focus-visible {
 	align-items: center;
 	gap: 8px;
 	color: #8f9ab0;
-	font-size: 0.61rem;
+	font-size: 0.78rem;
 	font-weight: 680;
 }
 
@@ -1793,7 +1796,7 @@ select:focus-visible {
 .sync-status p {
 	margin: 0;
 	color: var(--muted-bright);
-	font-size: 0.7rem;
+	font-size: 0.9rem;
 	line-height: 1.45;
 }
 
@@ -1826,7 +1829,7 @@ select:focus-visible {
 	border: 1px dashed var(--border-soft);
 	border-radius: 10px;
 	color: #6f7b91;
-	font-size: 0.7rem;
+	font-size: 0.9rem;
 }
 
 .tab-list.empty-tabs p {
@@ -1845,7 +1848,7 @@ select:focus-visible {
 	left: 2px;
 	margin: 0;
 	color: #79869d;
-	font-size: 0.65rem;
+	font-size: 0.83rem;
 }
 
 .tab-row-skeleton {
@@ -1939,7 +1942,7 @@ select:focus-visible {
 	border: 1px solid rgba(75, 199, 234, 0.2);
 	border-radius: 999px;
 	color: #7ddbf4;
-	font-size: 0.5rem;
+	font-size: 0.72rem;
 	font-weight: 700;
 }
 
@@ -1952,7 +1955,7 @@ select:focus-visible {
 
 .tab-title {
 	color: #d8deea;
-	font-size: 0.69rem;
+	font-size: 0.88rem;
 	font-weight: 680;
 	text-decoration: none;
 }
@@ -1963,7 +1966,7 @@ select:focus-visible {
 
 .tab-url {
 	color: #657188;
-	font-size: 0.58rem;
+	font-size: 0.74rem;
 }
 
 .settings-panel {
@@ -1997,7 +2000,7 @@ select:focus-visible {
 	border-radius: 999px;
 	background: rgba(8, 11, 19, 0.25);
 	color: var(--muted);
-	font-size: 0.6rem;
+	font-size: 0.77rem;
 	font-weight: 680;
 	white-space: nowrap;
 }
@@ -2034,7 +2037,7 @@ select:focus-visible {
 	max-width: min(50vw, 560px);
 	overflow: hidden;
 	color: #657188;
-	font-size: 0.57rem;
+	font-size: 0.73rem;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
@@ -2078,7 +2081,7 @@ select:focus-visible {
 
 .tracker-control-identity strong {
 	overflow: hidden;
-	font-size: 0.74rem;
+	font-size: 0.95rem;
 	font-weight: 690;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -2087,7 +2090,7 @@ select:focus-visible {
 .tracker-control-identity span {
 	overflow: hidden;
 	color: var(--muted);
-	font-size: 0.59rem;
+	font-size: 0.76rem;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
@@ -2153,7 +2156,7 @@ button.tracker-toggle:hover:not(:disabled) {
 }
 
 .switch-label {
-	font-size: 0.58rem;
+	font-size: 0.74rem;
 	font-weight: 720;
 }
 
@@ -2171,11 +2174,11 @@ button.tracker-toggle:hover:not(:disabled) {
 .setup-empty p {
 	margin: 0;
 	color: var(--muted);
-	font-size: 0.7rem;
+	font-size: 0.9rem;
 }
 
 .setup-empty strong {
-	font-size: 0.72rem;
+	font-size: 0.92rem;
 }
 
 .settings-panel > summary,
@@ -2207,14 +2210,14 @@ button.tracker-toggle:hover:not(:disabled) {
 .settings-panel > summary small {
 	margin-bottom: 3px;
 	color: var(--muted);
-	font-size: 0.58rem;
+	font-size: 0.74rem;
 	font-weight: 700;
 	letter-spacing: 0.09em;
 	text-transform: uppercase;
 }
 
 .settings-panel > summary strong {
-	font-size: 0.82rem;
+	font-size: 1.05rem;
 }
 
 .summary-chevron {
@@ -2265,13 +2268,13 @@ button.tracker-toggle:hover:not(:disabled) {
 }
 
 .quota-settings > summary strong {
-	font-size: 0.72rem;
+	font-size: 0.92rem;
 }
 
 .quota-settings > summary small {
 	margin-top: 3px;
 	color: var(--muted);
-	font-size: 0.57rem;
+	font-size: 0.73rem;
 }
 
 .settings-body {
@@ -2293,7 +2296,7 @@ button.tracker-toggle:hover:not(:disabled) {
 
 .field label {
 	color: #8f9ab0;
-	font-size: 0.61rem;
+	font-size: 0.78rem;
 	font-weight: 680;
 }
 
@@ -2308,7 +2311,7 @@ button.tracker-toggle:hover:not(:disabled) {
 	border-radius: 8px;
 	background: #0d1220;
 	color: #e8ebf2;
-	font-size: 0.71rem;
+	font-size: 0.91rem;
 }
 
 .field input:hover,
@@ -2336,7 +2339,7 @@ button.tracker-toggle:hover:not(:disabled) {
 	max-width: 60%;
 	overflow: hidden;
 	color: #68758c;
-	font-size: 0.58rem;
+	font-size: 0.74rem;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
@@ -2371,7 +2374,9 @@ button.tracker-toggle:hover:not(:disabled) {
 	.app-shell { grid-template-columns: 82px minmax(0, 1fr); }
 	.sidebar { width: 82px; padding-inline: 13px; }
 	.brand { justify-content: center; padding: 0; }
-	.brand > span:last-child,
+	/* font-size: 0 never reached the wordmark -- .brand strong sets its own size,
+	   so it stayed visible and wrapped out of the 82px rail. Hide the span. */
+	.brand > span:last-child { display: none; }
 	.nav-item:not(.active)::after,
 	.nav-item { font-size: 0; }
 	.nav-item { justify-content: center; padding: 0; }
@@ -2409,7 +2414,7 @@ button.tracker-toggle:hover:not(:disabled) {
 		border: 1px solid var(--border-soft);
 		border-radius: 9px;
 		color: var(--muted);
-		font-size: 0.65rem;
+		font-size: 0.83rem;
 		font-weight: 680;
 		text-decoration: none;
 	}
@@ -2418,8 +2423,8 @@ button.tracker-toggle:hover:not(:disabled) {
 		background: rgba(139, 127, 255, 0.1);
 		color: #e7e4ff;
 	}
-	.live-pill { min-height: 28px; padding: 4px 8px; font-size: 0.62rem; }
-	.pill-countdown { font-size: 0.6rem; }
+	.live-pill { min-height: 28px; padding: 4px 8px; font-size: 0.79rem; }
+	.pill-countdown { font-size: 0.77rem; }
 	.header-actions { width: 100%; justify-content: flex-start; margin-top: 12px; }
 	.header-status { flex: 1 1 auto; }
 	.headline-panel { padding: 16px 15px; }
