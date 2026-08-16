@@ -54,6 +54,7 @@ let autoScanTimer = null;
 let chromeTicker = null;
 let nextAutoSyncAt = null;
 let lastSyncedAt = null;
+let rateLimitedUntil = null;
 let autoScanStatus = typeof document !== 'undefined' ? 'Finding provider tabs…' : 'Ready';
 let availableTabs = [];
 let selectedTabIds = [];
@@ -902,9 +903,12 @@ function updateDashboardChrome(container = document.getElementById('app')) {
 	if (status) status.innerHTML = renderHeaderStatus();
 	const syncButton = container.querySelector('.header-sync-button');
 	if (syncButton) {
-		const syncLabel = scanInProgress ? 'Refreshing and scanning provider tabs' : 'Sync provider tabs';
+		const limit = rateLimitState();
+		const syncLabel = scanInProgress
+			? 'Refreshing and scanning provider tabs'
+			: limit.limited ? limit.label : 'Sync provider tabs';
 		syncButton.classList.toggle('is-syncing', scanInProgress);
-		syncButton.disabled = scanInProgress;
+		syncButton.disabled = scanInProgress || limit.limited;
 		syncButton.setAttribute('aria-label', syncLabel);
 		syncButton.title = syncLabel;
 	}
@@ -925,9 +929,11 @@ function renderHeaderStatus(now = Date.now()) {
 	const autoSync = autoSyncBadgeState();
 	const countdown = syncCountdownState(isRefreshPlanRunning(), nextAutoSyncAt, scanInProgress, now);
 	const syncedAgo = formatSyncedAgo(lastSyncedAt, now);
+	const limit = rateLimitState(rateLimitedUntil, now);
 	return `
 		<span class="live-pill ${autoSync.state === 'on' ? 'is-live' : ''}" data-auto-sync-state="${autoSync.state}" title="${escapeHtml(countdown.label ? `${autoSync.label} · ${countdown.label}` : autoSync.label)}"><i></i><span class="pill-label">${escapeHtml(autoSync.label)}</span>${countdown.label ? `<em class="pill-countdown" data-sync-countdown="${countdown.state}">${escapeHtml(countdown.label)}</em>` : ''}</span>
 		<span class="live-pill sync-age-pill" data-sync-age title="Time since the trackers last received fresh numbers">${escapeHtml(syncedAgo)}</span>
+		${limit.limited ? `<span class="live-pill rate-limit-pill" data-rate-limit title="The extension refuses to reload the same provider page too soon. No request was sent.">${escapeHtml(limit.label)}</span>` : ''}
 	`;
 }
 
@@ -1773,6 +1779,23 @@ async function refreshTabList(shouldRender = true) {
 	return true;
 }
 
+// A refusal by the extension's own rate limit used to be invisible on Overview,
+// where the scan status is not rendered at all: the Sync button span and nothing
+// changed. Surface when it can be retried instead.
+function rateLimitRetryAt(failures, now = Date.now()) {
+	const longest = (Array.isArray(failures) ? failures : [])
+		.map((failure) => Number(failure?.retryAfterMs))
+		.filter((value) => Number.isFinite(value) && value > 0)
+		.reduce((slowest, value) => Math.max(slowest, value), 0);
+	return longest > 0 ? now + longest : null;
+}
+
+function rateLimitState(until = rateLimitedUntil, now = Date.now()) {
+	const at = Number(until);
+	if (!Number.isFinite(at) || at <= now) return { limited: false, label: '' };
+	return { limited: true, label: `Rate limited · retry in ${formatSyncCountdown(at - now)}` };
+}
+
 // A partly successful scan used to report only a count, so the one thing that
 // explains an empty tracker — why that tab produced nothing — was discarded.
 // Name the tab and say why.
@@ -1809,6 +1832,7 @@ async function scanSelectedTabs() {
 		}
 		const failures = Array.isArray(response.errors) ? response.errors : [];
 		if (!response.results.length) {
+			rateLimitedUntil = rateLimitRetryAt(failures);
 			autoScanStatus = failures.length
 				? `No data: ${failures[0].message}`
 				: 'No quota data found';
@@ -1816,6 +1840,7 @@ async function scanSelectedTabs() {
 		}
 		const updatedCount = applyScrapedPayloads(response.results);
 		if (updatedCount) lastSyncedAt = Date.now();
+		rateLimitedUntil = rateLimitRetryAt(failures);
 		const failureSuffix = failures.length ? ` · ${describeScanFailures(failures)}` : '';
 		autoScanStatus = `${updatedCount} quota${updatedCount === 1 ? '' : 's'} synced${failureSuffix}`;
 	} finally {
@@ -1851,6 +1876,23 @@ function applyScrapedPayloads(payloads) {
 
 function applyScrapedPayload(payload) {
 	return applyScrapedPayloads([payload]) === 1;
+}
+
+// The extension's popup asks the page to run its own refresh rather than
+// scanning separately. Accepting this grants the extension nothing new -- the
+// page can already start a scan whenever it likes.
+function isExtensionRefreshCommand(event) {
+	return event?.source === window
+		&& event.origin === window.location.origin
+		&& event.data?.channel === EXTENSION_BRIDGE_CHANNEL
+		&& event.data?.direction === 'command'
+		&& event.data?.type === 'EXTENSION_REFRESH_NOW';
+}
+
+function handleExtensionCommand(event) {
+	if (!isExtensionRefreshCommand(event)) return false;
+	void connectAndScan();
+	return true;
 }
 
 async function sendExtensionRequest(type, details = {}, timeoutMs = 15_000) {
@@ -1994,6 +2036,7 @@ if (typeof document !== 'undefined') {
 	preferences = loadPreferences();
 	lastSyncedAt = latestModelUpdate(loadModels());
 	startChromeTicker();
+	window.addEventListener('message', handleExtensionCommand);
 	if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual';
 	window.addEventListener('hashchange', () => {
 		render();
@@ -2011,7 +2054,11 @@ if (typeof module === 'object' && module.exports) {
 		autoSyncBadgeState,
 		documentTitle,
 		formatRefreshInterval,
+		handleExtensionCommand,
+		isExtensionRefreshCommand,
 		isRefreshPlanRunning,
+		rateLimitRetryAt,
+		rateLimitState,
 		normalizeRefreshCount,
 		normalizeRefreshIntervalSeconds,
 		refreshIntervalMilliseconds,

@@ -8,6 +8,9 @@ const {
   documentTitle,
   formatRefreshInterval,
   formatResetDateTime,
+  isExtensionRefreshCommand,
+  rateLimitRetryAt,
+  rateLimitState,
   isRefreshPlanRunning,
   normalizeRefreshCount,
   normalizeRefreshIntervalSeconds,
@@ -454,6 +457,49 @@ test('upgrading from perpetual auto-sync does not start a run', () => {
   assert.equal(migrated.refreshPlan.intervalSeconds, 300);
   assert.equal(Object.hasOwn(migrated, 'autoSyncEnabled'), false);
   assert.equal(isRefreshPlanRunning(loadPreferences(storage).refreshPlan), false);
+});
+
+test('a rate-limited scan reports when it can be retried instead of failing silently', () => {
+  const now = Date.parse('2026-08-16T10:00:00.000Z');
+
+  assert.equal(rateLimitRetryAt([], now), null);
+  assert.equal(rateLimitRetryAt([{ message: 'something else' }], now), null);
+  // The longest wait wins, so the countdown never expires early.
+  assert.equal(
+    rateLimitRetryAt([{ retryAfterMs: 60_000 }, { retryAfterMs: 240_000 }], now),
+    now + 240_000
+  );
+
+  assert.deepEqual(rateLimitState(null, now), { limited: false, label: '' });
+  assert.deepEqual(rateLimitState(now - 1, now), { limited: false, label: '' });
+  assert.deepEqual(rateLimitState(now + 90_000, now), {
+    limited: true, label: 'Rate limited · retry in 1:30'
+  });
+  // It clears itself as the clock passes it, without needing a scan to reset it.
+  assert.equal(rateLimitState(now + 5_000, now + 6_000).limited, false);
+});
+
+test('the extension refresh command is accepted only from this page and origin', () => {
+  const win = { location: { origin: 'http://localhost:5074' } };
+  global.window = win;
+  const command = {
+    channel: 'llm-run-rate-tracker',
+    direction: 'command',
+    type: 'EXTENSION_REFRESH_NOW'
+  };
+  const at = (overrides = {}) => ({ source: win, origin: win.location.origin, data: command, ...overrides });
+
+  assert.equal(isExtensionRefreshCommand(at()), true);
+  // A different window, a different origin, or a different shape is ignored, so
+  // an embedded frame or a lookalike origin cannot trigger a provider reload.
+  assert.equal(isExtensionRefreshCommand(at({ source: {} })), false);
+  assert.equal(isExtensionRefreshCommand(at({ origin: 'https://evil.example' })), false);
+  assert.equal(isExtensionRefreshCommand(at({ data: { ...command, direction: 'response' } })), false);
+  assert.equal(isExtensionRefreshCommand(at({ data: { ...command, channel: 'other' } })), false);
+  assert.equal(isExtensionRefreshCommand(at({ data: { ...command, type: 'SOMETHING_ELSE' } })), false);
+  assert.equal(isExtensionRefreshCommand(at({ data: undefined })), false);
+  assert.equal(isExtensionRefreshCommand(undefined), false);
+  delete global.window;
 });
 
 test('the Overview refresh control offers only bounded choices and reports progress', () => {

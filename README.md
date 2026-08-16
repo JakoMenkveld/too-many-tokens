@@ -98,7 +98,7 @@ On OpenAI pages, controls such as **Day** are ignored unless they belong to an a
 
 Blocks whose only nearby text is a figure rather than a name — a promo reading `$0.00 spent`, say — are skipped too, since a tracker titled with a number tells you nothing and goes stale. Trackers you create yourself are never removed, whatever you call them.
 
-Clicking the extension toolbar icon opens the tracker, or focuses its existing tab. It does not scrape into, read from, or write to the clipboard.
+Clicking the extension toolbar icon opens a small popup with **Refresh now** and **Open dashboard**. Refresh now asks the already-open dashboard to run its normal sync; the extension never scans or stores anything on its own, and it does not scrape into, read from, or write to the clipboard.
 
 ## Supported providers
 
@@ -188,6 +188,15 @@ rate-limit error instead. The cooldown is keyed on the page URL, so reopening th
 tab grants no fresh allowance, and it is held in session storage so it survives the
 service worker being evicted. Going faster than this means editing the extension as
 well as the page — which is the point of it living in two places.
+
+**One refresh is treated differently, and only one.** A click in the extension's
+own popup is the single request Chrome can vouch for as coming from a person
+rather than from a page, so it earns a shorter 60-second floor. That allowance is
+recorded in the extension, expires in 30 seconds, and is spent by the first scan
+that uses it. The dashboard cannot ask for it — if it could, an edited page would
+ask for it every time and the 5-minute floor would mean nothing. This is what
+makes a manual retry practical after you fix a signed-out provider tab, without
+weakening the limit that applies to everything else.
 
 The lowest-footprint way to use this is to not start a run at all and press Sync
 when you actually want to know.

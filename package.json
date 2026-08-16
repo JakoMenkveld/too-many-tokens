@@ -18,7 +18,7 @@
     "build": "node scripts/build-static.js",
     "start": "node serve.js",
     "test": "node --test",
-    "check": "node --check tracker-core.js && node --check app.js && node --check serve.js && node --check scripts/build-static.js && node --check chrome-extension/tracker-origins.js && node --check chrome-extension/providers.js && node --check chrome-extension/scraper.js && node --check chrome-extension/background.js && node --check chrome-extension/content-script.js",
+    "check": "node --check tracker-core.js && node --check app.js && node --check serve.js && node --check scripts/build-static.js && node --check chrome-extension/tracker-origins.js && node --check chrome-extension/providers.js && node --check chrome-extension/scraper.js && node --check chrome-extension/background.js && node --check chrome-extension/content-script.js && node --check chrome-extension/popup.js",
     "sync-manifest": "node scripts/sync-manifest.js"
   },
   "engines": {

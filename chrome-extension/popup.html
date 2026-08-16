@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <title>Too Many Tokens</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --panel: #111624;
+      --border: rgba(128, 145, 178, 0.18);
+      --text: #f4f6fb;
+      --muted: #8e99ad;
+      --accent: #8b7fff;
+    }
+
+    body {
+      width: 268px;
+      margin: 0;
+      padding: 14px;
+      background: #0b0f1a;
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      font-size: 13px;
+    }
+
+    h1 {
+      margin: 0 0 3px;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11.5px;
+      line-height: 1.45;
+    }
+
+    .actions {
+      display: grid;
+      gap: 8px;
+      margin: 12px 0 10px;
+    }
+
+    button {
+      min-height: 36px;
+      padding: 8px 12px;
+      border: 1px solid rgba(139, 127, 255, 0.55);
+      border-radius: 9px;
+      background: rgba(139, 127, 255, 0.16);
+      color: var(--text);
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      border-color: var(--border);
+      background: var(--panel);
+    }
+
+    button:hover:not(:disabled) {
+      border-color: var(--accent);
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    #status {
+      min-height: 30px;
+      padding: 7px 9px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 11.5px;
+      line-height: 1.4;
+    }
+
+    #status.error {
+      border-color: rgba(255, 122, 146, 0.4);
+      color: #ffb3c0;
+    }
+
+    #status.ok {
+      border-color: rgba(61, 214, 170, 0.35);
+      color: #87e8ca;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Too Many Tokens</h1>
+  <p>Refresh now reloads your selected provider tabs once and reads them.</p>
+
+  <div class="actions">
+    <button id="refresh" type="button">Refresh now</button>
+    <button id="open" class="secondary" type="button">Open dashboard</button>
+  </div>
+
+  <div id="status" role="status" aria-live="polite">Ready.</div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>

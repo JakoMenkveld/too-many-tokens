@@ -66,6 +66,33 @@ async function handleWindowMessage(event, win = globalThis.window, chromeApi = g
   return true;
 }
 
+// The only message the extension pushes to the page unprompted. It carries no
+// data and grants the page nothing it could not already do by itself -- the page
+// can always start its own scan. It exists so a popup click reaches the normal
+// refresh path instead of the extension growing a second way to write results.
+function postBridgeCommand(win, type) {
+  win.postMessage({
+    channel: BRIDGE_CHANNEL,
+    direction: 'command',
+    type
+  }, win.location.origin);
+}
+
+function handleRuntimeCommand(message, win = globalThis.window) {
+  if (message?.type !== 'TRACKER_REFRESH_NOW') return false;
+  postBridgeCommand(win, 'EXTENSION_REFRESH_NOW');
+  return true;
+}
+
+if (globalThis.chrome?.runtime?.onMessage?.addListener) {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Only the service worker of this same extension can reach a content script.
+    const handled = handleRuntimeCommand(message);
+    sendResponse({ ok: handled });
+    return false;
+  });
+}
+
 if (globalThis.window?.addEventListener) {
   window.addEventListener('message', (event) => {
     handleWindowMessage(event).catch((error) => {
@@ -84,7 +111,9 @@ if (typeof module === 'object' && module.exports) {
   module.exports = {
     BRIDGE_CHANNEL,
     REQUEST_TYPES,
+    handleRuntimeCommand,
     handleWindowMessage,
+    postBridgeCommand,
     postBridgeResponse,
     sendRuntimeMessage
   };

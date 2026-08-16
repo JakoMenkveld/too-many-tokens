@@ -30,6 +30,21 @@ const SCAN_COOLDOWN_MS = 5 * 60 * 1000;
 const SCAN_COOLDOWN_STORAGE_KEY = 'scanCooldowns';
 const SCAN_COOLDOWN_MAX_ENTRIES = 50;
 
+// A click in the extension's own popup is the one refresh request Chrome can
+// vouch for: it cannot originate from a page. That click earns a shorter floor,
+// because a person pressing a button is the non-automated case the 5-minute
+// limit exists to distinguish from.
+//
+// The page is never told this exists and cannot request it. A scan only gets the
+// shorter floor if a popup gesture was recorded here in the last few seconds,
+// and the gesture is consumed by the first scan that uses it, so it buys exactly
+// one refresh of the current selection.
+const MANUAL_SCAN_COOLDOWN_MS = 60 * 1000;
+const MANUAL_GESTURE_TTL_MS = 30 * 1000;
+const MANUAL_GESTURE_STORAGE_KEY = 'manualGestureAt';
+
+let manualGestureFallback = null;
+
 // Used only when chrome.storage.session is unavailable. In the extension it
 // always is, and session storage is what keeps the limit alive across service
 // worker eviction -- a plain module variable would reset every ~30 idle seconds.
@@ -86,9 +101,12 @@ function describeCooldownWait(milliseconds) {
   return `${minutes}m ${String(seconds % 60).padStart(2, '0')}s`;
 }
 
-async function claimScanAllowance(url, chromeApi, nowValue) {
+async function claimScanAllowance(url, chromeApi, nowValue, cooldownMs = SCAN_COOLDOWN_MS) {
   const key = scanCooldownKey(url);
   if (!key) return { allowed: true, retryAfterMs: 0 };
+  // Never longer than the standard floor and never shorter than the manual one,
+  // whatever a caller passes.
+  const window = Math.min(SCAN_COOLDOWN_MS, Math.max(MANUAL_SCAN_COOLDOWN_MS, Number(cooldownMs) || 0));
 
   // Callers pass either a Date or epoch milliseconds; store one type.
   const parsedNow = Number(nowValue);
@@ -97,8 +115,8 @@ async function claimScanAllowance(url, chromeApi, nowValue) {
   const last = Number(cooldowns.get(key));
   if (Number.isFinite(last)) {
     const elapsed = at - last;
-    if (elapsed >= 0 && elapsed < SCAN_COOLDOWN_MS) {
-      return { allowed: false, retryAfterMs: SCAN_COOLDOWN_MS - elapsed };
+    if (elapsed >= 0 && elapsed < window) {
+      return { allowed: false, retryAfterMs: window - elapsed };
     }
   }
 
@@ -107,10 +125,53 @@ async function claimScanAllowance(url, chromeApi, nowValue) {
   return { allowed: true, retryAfterMs: 0 };
 }
 
+async function recordManualGesture(chromeApi, nowValue) {
+  const at = Number(nowValue);
+  manualGestureFallback = Number.isFinite(at) ? at : Date.now();
+  const store = chromeApi?.storage?.session;
+  if (!store?.set) return;
+  try {
+    await store.set({ [MANUAL_GESTURE_STORAGE_KEY]: manualGestureFallback });
+  } catch (error) {
+    // The in-memory copy still covers this worker's lifetime.
+  }
+}
+
+// One-shot: reading the gesture also clears it, so a single popup click cannot
+// keep granting the shorter floor to scan after scan.
+async function consumeManualGesture(chromeApi, nowValue) {
+  const now = Number(nowValue);
+  const at = Number.isFinite(now) ? now : Date.now();
+  const store = chromeApi?.storage?.session;
+  let recordedAt = manualGestureFallback;
+  if (store?.get) {
+    try {
+      const stored = await store.get(MANUAL_GESTURE_STORAGE_KEY);
+      const value = Number(stored?.[MANUAL_GESTURE_STORAGE_KEY]);
+      if (Number.isFinite(value)) recordedAt = value;
+    } catch (error) {
+      // Fall back to the in-memory copy.
+    }
+  }
+
+  manualGestureFallback = null;
+  if (store?.remove) {
+    try {
+      await store.remove(MANUAL_GESTURE_STORAGE_KEY);
+    } catch (error) {
+      // Already cleared in memory; the TTL below covers a stale stored value.
+    }
+  }
+
+  const elapsed = at - Number(recordedAt);
+  return Number.isFinite(Number(recordedAt)) && elapsed >= 0 && elapsed <= MANUAL_GESTURE_TTL_MS;
+}
+
 // Test seam only. There is deliberately no message type that clears the
 // cooldown, so the dashboard page cannot reset its own limit.
 function resetScanCooldowns() {
   scanCooldownFallback.clear();
+  manualGestureFallback = null;
 }
 
 function collectPageSnapshot() {
@@ -169,6 +230,22 @@ function isTrackerUrl(value) {
 
 function isTrustedTrackerSender(sender) {
   return Boolean(sender?.tab?.url && isTrackerUrl(sender.tab.url));
+}
+
+// The popup runs at this extension's own chrome-extension:// origin and has no
+// sender.tab. A web page cannot forge that origin, which is exactly why a click
+// arriving here is worth more than one a page claims to have seen.
+function isExtensionUiSender(sender, chromeApi = globalThis.chrome) {
+  const extensionId = sender?.id;
+  if (!extensionId || (chromeApi?.runtime?.id && extensionId !== chromeApi.runtime.id)) {
+    return false;
+  }
+  if (sender.tab) return false;
+  try {
+    return new URL(String(sender.url || '')).protocol === 'chrome-extension:';
+  } catch (error) {
+    return false;
+  }
 }
 
 function isScannableTab(tab) {
@@ -292,12 +369,12 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
     }
 
     // Claimed before the reload, so a rejected scan never touches the provider.
-    const allowance = await claimScanAllowance(tab.url, chromeApi, nowValue);
+    const allowance = await claimScanAllowance(tab.url, chromeApi, nowValue, options.cooldownMs);
     if (!allowance.allowed) {
       return {
         result: null,
         results: [],
-        error: `Rate limited: this page was scanned less than 5 minutes ago. Next scan in ${describeCooldownWait(allowance.retryAfterMs)}.`,
+        error: `Rate limited: this page was scanned too recently. Next scan in ${describeCooldownWait(allowance.retryAfterMs)}.`,
         retryAfterMs: allowance.retryAfterMs
       };
     }
@@ -445,6 +522,25 @@ async function getAllUsageFromTabs(chromeApi = globalThis.chrome) {
 }
 
 function handleRuntimeMessage(message, sender, sendResponse, chromeApi = globalThis.chrome) {
+  if (isExtensionUiSender(sender, chromeApi)) {
+    if (message?.type === 'POPUP_OPEN_TRACKER') {
+      openOrFocusTracker(chromeApi)
+        .then((tabId) => sendResponse({ ok: true, tabId }))
+        .catch((error) => sendResponse({ ok: false, error: errorMessage(error, 'Unable to open the tracker.') }));
+      return true;
+    }
+
+    if (message?.type === 'POPUP_REFRESH_NOW') {
+      requestTrackerRefresh(chromeApi)
+        .then((outcome) => sendResponse({ ok: true, ...outcome }))
+        .catch((error) => sendResponse({ ok: false, error: errorMessage(error, 'Unable to request a refresh.') }));
+      return true;
+    }
+
+    sendResponse({ ok: false, error: 'Unsupported extension request.' });
+    return false;
+  }
+
   if (!isTrustedTrackerSender(sender)) {
     sendResponse({ ok: false, error: 'Request rejected: untrusted tracker origin.' });
     return false;
@@ -462,7 +558,12 @@ function handleRuntimeMessage(message, sender, sendResponse, chromeApi = globalT
   }
 
   if (message?.type === 'SCAN_SELECTED_TABS') {
-    scanTabIds(message.details?.tabIds, chromeApi)
+    // The page cannot ask for the shorter floor. It is granted only if a popup
+    // click was recorded here moments ago, and consuming it spends it.
+    consumeManualGesture(chromeApi, Date.now())
+      .then((manual) => scanTabIds(message.details?.tabIds, chromeApi, Date.now(), {
+        cooldownMs: manual ? MANUAL_SCAN_COOLDOWN_MS : SCAN_COOLDOWN_MS
+      }))
       .then(({ results, errors }) => sendResponse({ ok: true, results, errors }))
       .catch((error) => sendResponse({
         ok: false,
@@ -489,6 +590,34 @@ function handleRuntimeMessage(message, sender, sendResponse, chromeApi = globalT
   return false;
 }
 
+// The popup does not scan directly. It records the gesture and asks the open
+// dashboard to run its normal refresh, so results land in the page's storage by
+// the same path as every other scan -- there is no second way in.
+async function requestTrackerRefresh(chromeApi = globalThis.chrome, nowValue = Date.now()) {
+  const tabs = await chromeApi.tabs.query({});
+  const trackerTab = tabs.find((tab) => isTrackerUrl(tab.url));
+  if (!trackerTab?.id) {
+    const tabId = await openOrFocusTracker(chromeApi);
+    return { refreshed: false, opened: true, tabId, message: 'Opened the dashboard. Press Sync there once it loads.' };
+  }
+
+  await recordManualGesture(chromeApi, nowValue);
+  try {
+    await chromeApi.tabs.sendMessage(trackerTab.id, { type: 'TRACKER_REFRESH_NOW' });
+  } catch (error) {
+    // The refresh never reached the page, so give the allowance back rather than
+    // leaving it armed for whatever scan happens to come along next.
+    await consumeManualGesture(chromeApi, nowValue);
+    return {
+      refreshed: false,
+      opened: false,
+      tabId: trackerTab.id,
+      message: 'The dashboard tab did not respond. Refresh it, then try again.'
+    };
+  }
+  return { refreshed: true, opened: false, tabId: trackerTab.id, message: 'Refreshing the dashboard…' };
+}
+
 async function openOrFocusTracker(chromeApi = globalThis.chrome) {
   const tabs = await chromeApi.tabs.query({});
   const trackerTab = tabs.find((tab) => isTrackerUrl(tab.url));
@@ -508,19 +637,21 @@ if (globalThis.chrome?.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
 }
 
-if (globalThis.chrome?.action?.onClicked) {
-  chrome.action.onClicked.addListener(() => {
-    openOrFocusTracker().catch((error) => {
-      console.error('Unable to open the LLM tracker:', error);
-    });
-  });
-}
+// No action.onClicked listener: the manifest declares a default_popup, and
+// Chrome does not fire onClicked when one is set. Opening the tracker is now the
+// popup's "Open dashboard" button, routed through POPUP_OPEN_TRACKER.
 
 if (typeof module === 'object' && module.exports) {
   module.exports = {
+    MANUAL_GESTURE_TTL_MS,
+    MANUAL_SCAN_COOLDOWN_MS,
     SCAN_COOLDOWN_MS,
     TRACKER_URL,
     claimScanAllowance,
+    consumeManualGesture,
+    isExtensionUiSender,
+    recordManualGesture,
+    requestTrackerRefresh,
     collectPageSnapshot,
     collectStablePageSnapshot,
     scanCooldownKey,

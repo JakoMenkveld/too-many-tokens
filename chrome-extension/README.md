@@ -26,7 +26,9 @@ Before scraping, the extension reloads each selected provider tab, waits for the
 
 The **Setup** page controls each reading independently after extraction. For example, one Claude window can keep its session and weekly limits visible while its spend reading is hidden; later scans preserve that choice.
 
-The extension toolbar button is a tracker launcher. It focuses an existing tracker tab when one is open and otherwise opens a new tracker tab. It does not copy scraped data to the clipboard.
+The extension toolbar button opens a popup with two actions. **Open dashboard** focuses an existing tracker tab or opens a new one. **Refresh now** asks the open dashboard to run its normal sync — the popup never scans, parses, or stores anything itself, so there is exactly one code path that reads a provider page. Neither action copies scraped data to the clipboard.
+
+A popup click is the only refresh request Chrome can attribute to a person rather than to a page, because the popup runs at this extension's own `chrome-extension://` origin and has no `sender.tab`. It therefore earns a shorter 60-second scan floor instead of the usual 5 minutes. The allowance is recorded in the service worker, expires after 30 seconds, and is consumed by the first scan that uses it. The dashboard has no way to request it: a page-supplied "this was manual" flag would be forgeable, which would reduce the 5-minute floor to a suggestion.
 
 ## How communication works
 
@@ -59,7 +61,9 @@ The tracker uses reset information to derive the current hour within a cycle whe
 - Host permissions are limited to the specific providers the scraper supports (`claude.ai`, `chatgpt.com`, `*.openai.com`), generated from `chrome-extension/providers.js` via `npm run sync-manifest` — not a wildcard over arbitrary origins. Data is processed locally.
 - The content bridge is injected only for the fixed tracker origins generated into the manifest from `tracker-origins.js`, and validates both message source and origin.
 - Internal browser pages and the tracker tab are not offered as provider scan targets.
+- `storage` is used only for `chrome.storage.session`, which holds the per-page scan cooldown and the one-shot popup gesture. It is what keeps the rate limit alive across service worker eviction, since an in-memory value resets roughly every thirty idle seconds. Nothing is written to disk and no scraped data is stored there.
 - The extension does not persist scan results; tracker entries remain in the page's browser `localStorage` and no application backend is used.
+- The service worker pushes exactly one message to the page (`TRACKER_REFRESH_NOW`, relayed as an `EXTENSION_REFRESH_NOW` command). It carries no payload and grants the page nothing it could not already do by starting its own scan.
 
 ## Test changes
 
@@ -78,3 +82,4 @@ After changing extension files, reload the unpacked extension and refresh the tr
 - **One tab fails:** read the explicit error shown by the tracker; other selected-tab results can still be returned.
 - **A provider tab keeps loading:** the refresh is bounded by a timeout, so it is reported as that tab's error while other selected tabs continue.
 - **Values are incomplete:** provider markup and wording vary. Edit the tracker entry manually and update the scraper heuristic when the provider page changes.
+- **"Rate limited" instead of a scan:** the extension refuses to reload the same provider page within 5 minutes. No request was sent to the provider. The dashboard shows when it can be retried; the popup's **Refresh now** is allowed after 60 seconds.

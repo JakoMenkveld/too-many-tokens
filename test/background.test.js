@@ -5,8 +5,13 @@ const { beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const {
+  MANUAL_SCAN_COOLDOWN_MS,
   SCAN_COOLDOWN_MS,
   claimScanAllowance,
+  consumeManualGesture,
+  isExtensionUiSender,
+  recordManualGesture,
+  requestTrackerRefresh,
   collectPageSnapshot,
   collectStablePageSnapshot,
   handleRuntimeMessage,
@@ -487,6 +492,105 @@ test('the cooldown survives service worker eviction via session storage', async 
   resetScanCooldowns(); // simulate the service worker being evicted
   const afterEviction = await claimScanAllowance('https://chatgpt.com/codex/settings/usage', chromeApi, at + 1000);
   assert.equal(afterEviction.allowed, false, 'a restarted worker must still honour the cooldown');
+});
+
+test('only the extension popup can claim a manual gesture, never a page', () => {
+  const runtime = { id: 'tmt-extension-id' };
+  const chromeApi = { runtime };
+
+  // The popup: this extension's own origin, no tab behind it.
+  assert.equal(
+    isExtensionUiSender({ id: 'tmt-extension-id', url: 'chrome-extension://tmt-extension-id/popup.html' }, chromeApi),
+    true
+  );
+  // The tracker page, even though it is otherwise trusted, is not extension UI.
+  assert.equal(
+    isExtensionUiSender({ id: 'tmt-extension-id', url: 'http://localhost:5074/', tab: { id: 4, url: 'http://localhost:5074/' } }, chromeApi),
+    false
+  );
+  // A provider page claiming to be the popup.
+  assert.equal(
+    isExtensionUiSender({ id: 'tmt-extension-id', url: 'https://claude.ai/settings/usage' }, chromeApi),
+    false
+  );
+  // Another extension.
+  assert.equal(
+    isExtensionUiSender({ id: 'someone-else', url: 'chrome-extension://someone-else/popup.html' }, chromeApi),
+    false
+  );
+  assert.equal(isExtensionUiSender({}, chromeApi), false);
+  assert.equal(isExtensionUiSender(null, chromeApi), false);
+});
+
+test('a popup gesture shortens the floor once, and the page cannot ask for it', async () => {
+  const store = new Map();
+  const chromeApi = {
+    runtime: { id: 'tmt' },
+    storage: {
+      session: {
+        get: async (key) => (store.has(key) ? { [key]: store.get(key) } : {}),
+        set: async (entries) => { Object.entries(entries).forEach(([k, v]) => store.set(k, v)); },
+        remove: async (key) => { store.delete(key); }
+      }
+    }
+  };
+  const url = 'https://claude.ai/settings/usage';
+  const start = Date.parse('2026-08-16T10:00:00.000Z');
+
+  // Establish a cooldown.
+  assert.equal((await claimScanAllowance(url, chromeApi, start)).allowed, true);
+
+  // Two minutes later the standard floor still refuses.
+  assert.equal((await claimScanAllowance(url, chromeApi, start + 120_000)).allowed, false);
+
+  // A popup click lets the same page through after only a minute...
+  await recordManualGesture(chromeApi, start + 120_000);
+  assert.equal(await consumeManualGesture(chromeApi, start + 120_000), true);
+  assert.equal(
+    (await claimScanAllowance(url, chromeApi, start + 120_000, MANUAL_SCAN_COOLDOWN_MS)).allowed,
+    true
+  );
+
+  // ...but the gesture is spent, so the next read of it is false.
+  assert.equal(await consumeManualGesture(chromeApi, start + 121_000), false);
+
+  // And a stale gesture past its TTL does not count.
+  await recordManualGesture(chromeApi, start);
+  assert.equal(await consumeManualGesture(chromeApi, start + 120_000), false);
+});
+
+test('the manual floor is a floor, not an override', async () => {
+  const chromeApi = { runtime: { id: 'tmt' } };
+  const url = 'https://chatgpt.com/codex/settings/usage';
+  const start = Date.parse('2026-08-16T10:00:00.000Z');
+
+  assert.equal((await claimScanAllowance(url, chromeApi, start)).allowed, true);
+
+  // A caller asking for no cooldown at all still gets the 60-second minimum.
+  assert.equal((await claimScanAllowance(url, chromeApi, start + 1000, 0)).allowed, false);
+  assert.equal((await claimScanAllowance(url, chromeApi, start + 59_000, 1)).allowed, false);
+  assert.equal((await claimScanAllowance(url, chromeApi, start + 60_000, 0)).allowed, true);
+});
+
+test('popup messages are accepted only from extension UI, scan messages only from the tracker', async () => {
+  const chromeApi = {
+    runtime: { id: 'tmt' },
+    tabs: { query: async () => [] , create: async () => ({ id: 9 }) }
+  };
+  const popupSender = { id: 'tmt', url: 'chrome-extension://tmt/popup.html' };
+
+  const rejected = await new Promise((resolve) => {
+    handleRuntimeMessage({ type: 'POPUP_REFRESH_NOW' }, { tab: { url: 'https://claude.ai/settings/usage' } }, resolve, chromeApi);
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /untrusted tracker origin/i);
+
+  // The popup cannot drive a raw scan either -- only its two named actions.
+  const notAScanner = await new Promise((resolve) => {
+    handleRuntimeMessage({ type: 'SCAN_SELECTED_TABS', details: { tabIds: [1] } }, popupSender, resolve, chromeApi);
+  });
+  assert.equal(notAScanner.ok, false);
+  assert.match(notAScanner.error, /unsupported/i);
 });
 
 test('multi-tab scans flatten all metric results', async () => {

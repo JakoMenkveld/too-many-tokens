@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   BRIDGE_CHANNEL,
+  handleRuntimeCommand,
   handleWindowMessage,
   sendRuntimeMessage
 } = require('../chrome-extension/content-script.js');
@@ -75,4 +76,33 @@ test('synchronous invalidated-context errors are returned explicitly', async () 
 
   assert.equal(response.ok, false);
   assert.match(response.error, /context invalidated/i);
+});
+
+test('the refresh command is relayed to the page, and nothing else is', () => {
+  const win = fakeWindow();
+
+  assert.equal(handleRuntimeCommand({ type: 'TRACKER_REFRESH_NOW' }, win), true);
+  assert.deepEqual(win.messages, [{
+    message: {
+      channel: BRIDGE_CHANNEL,
+      direction: 'command',
+      type: 'EXTENSION_REFRESH_NOW'
+    },
+    targetOrigin: 'http://localhost:5074'
+  }]);
+
+  // The relay carries no payload and forwards nothing else, so it cannot become
+  // a general channel for the service worker to push data into the page.
+  win.messages.length = 0;
+  for (const message of [
+    { type: 'SCAN_SELECTED_TABS' },
+    { type: 'TRACKER_REFRESH_NOW', details: { tabIds: [1] }, extra: 'ignored' },
+    { type: '' },
+    null
+  ]) {
+    handleRuntimeCommand(message, win);
+  }
+  assert.equal(win.messages.length, 1, 'only the bare refresh command relays');
+  assert.equal(win.messages[0].message.details, undefined);
+  assert.equal(win.messages[0].message.extra, undefined);
 });

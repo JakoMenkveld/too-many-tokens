@@ -14,7 +14,8 @@
     "https://claude.ai/*"
   ],
   "action": {
-    "default_title": "Open Too Many Tokens"
+    "default_title": "Too Many Tokens",
+    "default_popup": "popup.html"
   },
   "background": {
     "service_worker": "background.js"
