@@ -2,8 +2,8 @@
 
 const STORAGE_KEY = 'llmRunRateTracker.models';
 const PREFERENCES_STORAGE_KEY = 'llmRunRateTracker.preferences';
-const PREFERENCES_SCHEMA_VERSION = 4;
-const LEGACY_PREFERENCES_SCHEMA_VERSIONS = Object.freeze([1, 2, 3]);
+const PREFERENCES_SCHEMA_VERSION = 5;
+const LEGACY_PREFERENCES_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4]);
 const EXTENSION_BRIDGE_CHANNEL = 'llm-run-rate-tracker';
 const DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 30;
 const MIN_AUTO_SYNC_INTERVAL_SECONDS = 30;
@@ -14,6 +14,10 @@ const PAGE_CONFIG = Object.freeze({
 	overview: { title: 'Overview' },
 	setup: { title: 'Setup' }
 });
+const APP_TITLE = 'Too Many Tokens';
+const DEFAULT_HEADLINE_SCOPE = 'overall';
+const HEADLINE_SCOPE_PATTERN = /^(?:overall|provider:.+|tracker:.+)$/;
+const CHROME_TICK_MS = 1000;
 const ICON_PATHS = Object.freeze({
 	refresh: '<path d="M20 7v5h-5"></path><path d="M4 17v-5h5"></path><path d="M6.1 8.5A7 7 0 0 1 18.8 7L20 12"></path><path d="M18 15.5A7 7 0 0 1 5.2 17L4 12"></path>',
 	duplicate: '<rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>',
@@ -35,6 +39,9 @@ const {
 } = trackerCore;
 
 let autoScanTimer = null;
+let chromeTicker = null;
+let nextAutoSyncAt = null;
+let lastSyncedAt = null;
 let autoScanStatus = typeof document !== 'undefined' ? 'Finding provider tabs…' : 'Ready';
 let availableTabs = [];
 let selectedTabIds = [];
@@ -51,11 +58,18 @@ function defaultPreferences() {
 		autoSyncEnabled: false,
 		autoSyncIntervalSeconds: DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
 		overviewPaceView: 'bars',
+		showHeadlineIndicator: true,
+		headlineScope: DEFAULT_HEADLINE_SCOPE,
 		providerTabs: {
 			initialized: false,
 			selectedTabs: []
 		}
 	};
+}
+
+function normalizeHeadlineScope(value) {
+	const scope = String(value ?? '').trim();
+	return HEADLINE_SCOPE_PATTERN.test(scope) ? scope : DEFAULT_HEADLINE_SCOPE;
 }
 
 function normalizeAutoSyncIntervalSeconds(value) {
@@ -138,6 +152,8 @@ function sanitizePreferences(value) {
 		autoSyncEnabled: value.autoSyncEnabled === true,
 		autoSyncIntervalSeconds: normalizeAutoSyncIntervalSeconds(value.autoSyncIntervalSeconds),
 		overviewPaceView: ['graph', 'runway'].includes(value.overviewPaceView) ? value.overviewPaceView : 'bars',
+		showHeadlineIndicator: value.showHeadlineIndicator !== false,
+		headlineScope: normalizeHeadlineScope(value.headlineScope),
 		providerTabs: {
 			initialized: value.providerTabs?.initialized === true,
 			selectedTabs
@@ -407,6 +423,52 @@ function formatDurationHours(value) {
 	return `${minutes}m`;
 }
 
+function formatSyncCountdown(milliseconds) {
+	const value = Number(milliseconds);
+	if (!Number.isFinite(value)) return '—';
+	const seconds = Math.max(0, Math.ceil(value / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function formatSyncedAgo(timestamp, now = Date.now()) {
+	// asValidDate(null) is the epoch, not an error — an unsynced dashboard must
+	// not claim it last synced in 1970.
+	const at = timestamp == null || timestamp === '' ? null : asValidDate(timestamp)?.getTime();
+	if (!Number.isFinite(at) || at <= 0) return 'Never synced';
+	const seconds = Math.max(0, Math.round((Number(now) - at) / 1000));
+	if (seconds < 10) return 'Synced just now';
+	if (seconds < 60) return `Synced ${seconds}s ago`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `Synced ${minutes}m ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `Synced ${hours}h ago`;
+	return `Synced ${Math.floor(hours / 24)}d ago`;
+}
+
+function syncCountdownState(
+	enabled = preferences.autoSyncEnabled,
+	nextAt = nextAutoSyncAt,
+	syncing = scanInProgress,
+	now = Date.now()
+) {
+	if (syncing) return { state: 'syncing', label: 'syncing now' };
+	const target = nextAt == null ? NaN : Number(nextAt);
+	if (!enabled || !Number.isFinite(target)) return { state: 'idle', label: '' };
+	return { state: 'counting', label: `next in ${formatSyncCountdown(target - Number(now))}` };
+}
+
+// "Last synced" is derived from the newest tracker timestamp rather than a
+// separately persisted clock, so it survives a reload and can never claim a
+// sync the stored numbers do not actually reflect.
+function latestModelUpdate(models) {
+	const newest = (Array.isArray(models) ? models : []).reduce((latest, model) => {
+		const at = asValidDate(model?.lastUpdatedAt)?.getTime();
+		return Number.isFinite(at) && at > latest ? at : latest;
+	}, 0);
+	return newest > 0 ? newest : null;
+}
+
 function projectedDepletionContext(model) {
 	const actual = clamp(Number(model?.actualCum) || 0, 0, 1);
 	const totalHours = Math.max(0, Number(model?.totalHours) || Number(model?.daysInCycle) * Number(model?.hoursPerDay) || 0);
@@ -475,6 +537,114 @@ function paceDeltaContext(actualValue, idealValue) {
 	return points > 0
 		? { label: `+${points} points above ideal`, shortLabel: `+${points}%`, tone: 'warning' }
 		: { label: `${Math.abs(points)} points below ideal`, shortLabel: `−${Math.abs(points)}%`, tone: 'healthy' };
+}
+
+function cycleWeightHours(model) {
+	const hours = Number(model?.totalHours)
+		|| Number(model?.daysInCycle) * Number(model?.hoursPerDay);
+	return Number.isFinite(hours) && hours > 0 ? hours : 0;
+}
+
+// Weighted by cycle length: a 168-hour weekly cap at 60% is far more of the
+// month's budget than a 5-hour session window at 60%, so a plain mean would let
+// a burnt session drag the headline around while a burnt week barely moved it.
+function overallPaceSummary(models) {
+	const entries = (Array.isArray(models) ? models : [])
+		.map((model) => ({
+			weight: cycleWeightHours(model),
+			actual: clamp(Number(model?.actualCum) || 0, 0, 1),
+			ideal: clamp(Number(model?.flatCum) || 0, 0, 1)
+		}))
+		.filter((entry) => entry.weight > 0);
+	const weightHours = entries.reduce((total, entry) => total + entry.weight, 0);
+	if (!entries.length || weightHours <= 0) {
+		return { available: false, count: 0, weightHours: 0, actual: 0, ideal: 0, delta: 0 };
+	}
+	const actual = entries.reduce((total, entry) => total + entry.weight * entry.actual, 0) / weightHours;
+	const ideal = entries.reduce((total, entry) => total + entry.weight * entry.ideal, 0) / weightHours;
+	return { available: true, count: entries.length, weightHours, actual, ideal, delta: actual - ideal };
+}
+
+function providerScopeKey(model) {
+	return `provider:${String(model?.provider || 'Provider').trim().toLocaleLowerCase() || 'provider'}`;
+}
+
+function trackerScopeKey(model) {
+	return `tracker:${String(model?.id ?? '')}`;
+}
+
+function headlineScopeOptions(models) {
+	const shown = (Array.isArray(models) ? models : []).filter((model) => cycleWeightHours(model) > 0);
+	const providers = [];
+	const seenProviders = new Set();
+	groupModelsByProvider(shown).forEach((group) => {
+		const value = providerScopeKey(group.models[0]);
+		if (seenProviders.has(value)) return;
+		seenProviders.add(value);
+		providers.push({ value, label: group.provider, count: group.models.length });
+	});
+	return {
+		overall: { value: DEFAULT_HEADLINE_SCOPE, label: 'Overall', count: shown.length },
+		providers,
+		trackers: sortTrackersAlphabetically(shown)
+			.map((model) => ({ value: trackerScopeKey(model), label: trackerDisplayLabel(model), count: 1 }))
+	};
+}
+
+// An unresolvable scope — a deleted tracker, a provider whose last tracker was
+// hidden — falls back to Overall rather than blanking the headline, and reports
+// that it did so, so the settings selector can show what is actually in use.
+function resolveHeadlineScope(models, scope = preferences.headlineScope) {
+	const shown = (Array.isArray(models) ? models : []).filter((model) => cycleWeightHours(model) > 0);
+	const requested = normalizeHeadlineScope(scope);
+	const overall = {
+		scope: DEFAULT_HEADLINE_SCOPE,
+		requested,
+		resolved: requested === DEFAULT_HEADLINE_SCOPE,
+		label: 'Overall',
+		models: shown
+	};
+	if (requested === DEFAULT_HEADLINE_SCOPE) return overall;
+
+	if (requested.startsWith('provider:')) {
+		const matches = shown.filter((model) => providerScopeKey(model) === requested);
+		if (!matches.length) return overall;
+		return {
+			scope: requested,
+			requested,
+			resolved: true,
+			label: String(matches[0].provider || 'Provider').trim() || 'Provider',
+			models: matches
+		};
+	}
+
+	const tracker = shown.find((model) => trackerScopeKey(model) === requested);
+	if (!tracker) return overall;
+	return {
+		scope: requested,
+		requested,
+		resolved: true,
+		label: trackerDisplayLabel(tracker),
+		models: [tracker]
+	};
+}
+
+function headlinePaceContext(models, value = preferences) {
+	const settings = sanitizePreferences(value);
+	const scope = resolveHeadlineScope(models, settings.headlineScope);
+	const summary = overallPaceSummary(scope.models);
+	return {
+		enabled: settings.showHeadlineIndicator,
+		available: settings.showHeadlineIndicator && summary.available,
+		scope,
+		summary,
+		delta: paceDeltaContext(summary.actual, summary.ideal)
+	};
+}
+
+function documentTitle(models, value = preferences) {
+	const headline = headlinePaceContext(models, value);
+	return headline.available ? `${headline.delta.shortLabel} — ${APP_TITLE}` : APP_TITLE;
 }
 
 function visualStatus(model) {
@@ -661,18 +831,19 @@ function render() {
 	}
 	renderedPage = page;
 	updateNavigation(page);
+	updateDocumentTitle(enabledModels);
 	if (page === 'setup' && pendingSettingsId) revealPendingSettings(container);
+}
+
+function updateDocumentTitle(models) {
+	if (typeof document === 'undefined') return;
+	document.title = documentTitle(models);
 }
 
 function updateDashboardChrome(container = document.getElementById('app')) {
 	if (!container) return;
-	const autoSync = autoSyncBadgeState();
-	const badge = container.querySelector('[data-auto-sync-state]');
-	if (badge) {
-		badge.dataset.autoSyncState = autoSync.state;
-		badge.classList.toggle('is-live', autoSync.state === 'on');
-		badge.innerHTML = `<i></i>${escapeHtml(autoSync.label)}`;
-	}
+	const status = container.querySelector('[data-header-status]');
+	if (status) status.innerHTML = renderHeaderStatus();
 	const syncButton = container.querySelector('.header-sync-button');
 	if (syncButton) {
 		const syncLabel = scanInProgress ? 'Refreshing and scanning provider tabs' : 'Sync provider tabs';
@@ -693,16 +864,25 @@ function autoSyncBadgeState(
 	return { state: 'on', label: 'Auto-sync on' };
 }
 
+function renderHeaderStatus(now = Date.now()) {
+	const autoSync = autoSyncBadgeState();
+	const countdown = syncCountdownState(preferences.autoSyncEnabled, nextAutoSyncAt, scanInProgress, now);
+	const syncedAgo = formatSyncedAgo(lastSyncedAt, now);
+	return `
+		<span class="live-pill ${autoSync.state === 'on' ? 'is-live' : ''}" data-auto-sync-state="${autoSync.state}" title="${escapeHtml(countdown.label ? `${autoSync.label} · ${countdown.label}` : autoSync.label)}"><i></i><span class="pill-label">${escapeHtml(autoSync.label)}</span>${countdown.label ? `<em class="pill-countdown" data-sync-countdown="${countdown.state}">${escapeHtml(countdown.label)}</em>` : ''}</span>
+		<span class="live-pill sync-age-pill" data-sync-age title="Time since the trackers last received fresh numbers">${escapeHtml(syncedAgo)}</span>
+	`;
+}
+
 function renderDashboard(models, enabledModels, page) {
 	const pageConfig = PAGE_CONFIG[page] || PAGE_CONFIG.overview;
 	const syncLabel = scanInProgress ? 'Refreshing and scanning provider tabs' : 'Sync provider tabs';
-	const autoSync = autoSyncBadgeState();
 	return `
 		<header class="dashboard-header">
 			<div class="mobile-brand"><span class="brand-mark">TMT</span><strong>Too Many Tokens</strong></div>
 			<h1>${escapeHtml(pageConfig.title)}</h1>
 			<div class="header-actions control-row">
-				<span class="live-pill ${autoSync.state === 'on' ? 'is-live' : ''}" data-auto-sync-state="${autoSync.state}"><i></i>${autoSync.label}</span>
+				<div class="header-status" data-header-status>${renderHeaderStatus()}</div>
 				<button class="header-sync-button ${scanInProgress ? 'is-syncing' : ''}" data-action="connect-scan" aria-label="${syncLabel}" title="${syncLabel}" ${scanInProgress ? 'disabled' : ''}>${icon('refresh')}</button>
 			</div>
 		</header>
@@ -723,7 +903,48 @@ function renderPage(page, models, enabledModels) {
 		: preferences.overviewPaceView === 'runway'
 			? renderRunwayView(enabledModels)
 			: renderComparisonChart(enabledModels);
-	return `<section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
+	return `${renderHeadlinePanel(enabledModels)}<section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
+}
+
+function headlineScopeCaption(headline) {
+	const { scope, summary } = headline;
+	const trackers = `${summary.count} tracker${summary.count === 1 ? '' : 's'}`;
+	const weight = `${Math.round(summary.weightHours).toLocaleString()}h of quota`;
+	if (scope.scope === DEFAULT_HEADLINE_SCOPE) {
+		return `Every shown tracker, weighted by cycle length · ${trackers} · ${weight}`;
+	}
+	if (summary.count === 1) return `Single tracker · ${weight}`;
+	return `Weighted by cycle length · ${trackers} · ${weight}`;
+}
+
+function renderHeadlinePanel(models) {
+	const headline = headlinePaceContext(models);
+	if (!headline.available) return '';
+	const { delta, summary, scope } = headline;
+	const idealMarker = clamp(summary.ideal * 100, 1, 99);
+	const description = `${scope.label}: ${formatPercent(summary.actual)} used, ${formatPercent(summary.ideal)} ideal by now, ${delta.label}`;
+	return `
+		<section class="panel headline-panel" aria-label="Headline quota pace">
+			<div class="headline-primary">
+				<div class="headline-identity">
+					<span class="headline-eyebrow">${escapeHtml(scope.label)}</span>
+					<strong class="headline-delta ${delta.tone}">${escapeHtml(delta.shortLabel)}</strong>
+				</div>
+				<p class="headline-note">${escapeHtml(delta.label)}<span>${escapeHtml(headlineScopeCaption(headline))}</span></p>
+			</div>
+			<svg class="headline-track" viewBox="0 0 100 10" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(description)}">
+				<title>${escapeHtml(description)}</title>
+				<rect class="pace-track" x="0" y="3" width="100" height="4" rx="2" />
+				<rect class="pace-value headline-value ${delta.tone}" x="0" y="3" width="${summary.actual * 100}" height="4" rx="2" />
+				<line class="ideal-marker" x1="${idealMarker}" y1="0.5" x2="${idealMarker}" y2="9.5" />
+			</svg>
+			<dl class="headline-metrics">
+				<div><dt>Used</dt><dd>${formatPercent(summary.actual)}</dd></div>
+				<div><dt>Ideal now</dt><dd>${formatPercent(summary.ideal)}</dd></div>
+				<div><dt>Trackers</dt><dd>${summary.count}</dd></div>
+			</dl>
+		</section>
+	`;
 }
 
 function renderPaceViewToggle(activeView = preferences.overviewPaceView) {
@@ -1090,12 +1311,51 @@ function renderSetupPage(models) {
 					<h2>Dashboard Trackers</h2>
 					<div class="tracker-counts"><span>${enabledCount} shown</span><span>${hiddenCount} hidden</span></div>
 				</div>
+				${renderHeadlineSettings(models.filter(isTrackerEnabled))}
 				${groups.length
 					? `<div class="tracker-groups">${groups.map(renderTrackerGroup).join('')}</div>`
 					: `<div class="setup-empty"><strong>No Trackers</strong><button data-action="connect-scan">Scan Provider Tabs</button></div>`}
 			</article>
 			${renderSettingsPanel(models)}
 		</section>
+	`;
+}
+
+function renderHeadlineSettings(enabledModels) {
+	const enabled = preferences.showHeadlineIndicator;
+	const scope = resolveHeadlineScope(enabledModels, preferences.headlineScope);
+	const options = headlineScopeOptions(enabledModels);
+	const option = (entry) => `<option value="${escapeHtml(entry.value)}" ${entry.value === scope.scope ? 'selected' : ''}>${escapeHtml(entry.label)}</option>`;
+	const fellBack = scope.requested !== scope.scope;
+	return `
+		<div class="headline-settings">
+			<div class="tracker-control ${enabled ? '' : 'is-hidden'}">
+				<div class="tracker-control-identity">
+					<strong>Headline indicator</strong>
+					<span>Weighted Δ pace shown above the Overview charts and in the browser tab title</span>
+				</div>
+				<button class="tracker-toggle" type="button" role="switch" aria-checked="${enabled}" aria-label="${enabled ? 'Hide' : 'Show'} the headline indicator" data-action="toggle-headline">
+					<span class="switch-track" aria-hidden="true"><span></span></span>
+					<span class="switch-label">${enabled ? 'Shown' : 'Hidden'}</span>
+				</button>
+			</div>
+			<div class="tracker-control ${enabled ? '' : 'is-hidden'}">
+				<div class="tracker-control-identity">
+					<strong>Headline source</strong>
+					<span>${fellBack
+						? 'The saved selection is no longer available — falling back to Overall'
+						: 'Which quota the headline number averages'}</span>
+				</div>
+				<label class="headline-scope">
+					<span class="visually-hidden">Headline indicator source</span>
+					<select data-headline-scope ${enabled ? '' : 'disabled'}>
+						${option(options.overall)}
+						${options.providers.length ? `<optgroup label="Provider">${options.providers.map(option).join('')}</optgroup>` : ''}
+						${options.trackers.length ? `<optgroup label="Tracker">${options.trackers.map(option).join('')}</optgroup>` : ''}
+					</select>
+				</label>
+			</div>
+		</div>
 	`;
 }
 
@@ -1202,6 +1462,13 @@ function bindDashboardEvents(container) {
 				pendingSettingsId = String(modelId);
 				navigateTo('setup');
 			}
+			if (action === 'toggle-headline') {
+				replacePreferences({
+					...preferences,
+					showHeadlineIndicator: event.currentTarget.getAttribute('aria-checked') !== 'true'
+				});
+				render();
+			}
 			if (action === 'toggle-tracker') {
 				setTrackerEnabled(modelId, event.currentTarget.getAttribute('aria-checked') !== 'true');
 			}
@@ -1223,6 +1490,13 @@ function bindDashboardEvents(container) {
 				stopAutoScan({ persist: false });
 				startAutoScan({ persist: false, immediate: false });
 			}
+			render();
+		});
+	});
+
+	container.querySelectorAll('[data-headline-scope]').forEach((select) => {
+		select.addEventListener('change', () => {
+			replacePreferences({ ...preferences, headlineScope: select.value });
 			render();
 		});
 	});
@@ -1258,7 +1532,6 @@ function updateNavigation(page) {
 		if (isActive) link.setAttribute('aria-current', 'page');
 		else link.removeAttribute('aria-current');
 	});
-	document.title = `${PAGE_CONFIG[page]?.title || PAGE_CONFIG.overview.title} — Too Many Tokens`;
 }
 
 function navigateTo(page) {
@@ -1435,6 +1708,7 @@ async function scanSelectedTabs() {
 			return;
 		}
 		const updatedCount = applyScrapedPayloads(response.results);
+		if (updatedCount) lastSyncedAt = Date.now();
 		const failureSuffix = failures.length ? ` · ${describeScanFailures(failures)}` : '';
 		autoScanStatus = `${updatedCount} quota${updatedCount === 1 ? '' : 's'} synced${failureSuffix}`;
 	} finally {
@@ -1524,10 +1798,15 @@ function startAutoScan({ persist = true, immediate = true } = {}) {
 	if (persist) replacePreferences({ ...preferences, autoSyncEnabled: true });
 	if (autoScanTimer) return true;
 	const intervalSeconds = normalizeAutoSyncIntervalSeconds(preferences.autoSyncIntervalSeconds);
+	const intervalMs = autoSyncIntervalMilliseconds(intervalSeconds);
 	autoScanStatus = selectedTabIds.length
 		? `Auto-sync on · every ${formatAutoSyncInterval(intervalSeconds)}`
 		: 'Auto-sync on · waiting for selected tab';
-	autoScanTimer = setInterval(pollOpenTabs, autoSyncIntervalMilliseconds(intervalSeconds));
+	nextAutoSyncAt = Date.now() + intervalMs;
+	autoScanTimer = setInterval(() => {
+		nextAutoSyncAt = Date.now() + intervalMs;
+		void pollOpenTabs();
+	}, intervalMs);
 	if (immediate) void pollOpenTabs();
 	return true;
 }
@@ -1537,8 +1816,14 @@ function stopAutoScan({ persist = true } = {}) {
 		clearInterval(autoScanTimer);
 		autoScanTimer = null;
 	}
+	nextAutoSyncAt = null;
 	if (persist) replacePreferences({ ...preferences, autoSyncEnabled: false });
 	autoScanStatus = 'Auto-sync off';
+}
+
+function startChromeTicker() {
+	if (chromeTicker || typeof document === 'undefined') return;
+	chromeTicker = setInterval(() => updateDashboardChrome(), CHROME_TICK_MS);
 }
 
 async function restoreProviderSync() {
@@ -1569,6 +1854,8 @@ function escapeHtml(text) {
 
 if (typeof document !== 'undefined') {
 	preferences = loadPreferences();
+	lastSyncedAt = latestModelUpdate(loadModels());
+	startChromeTicker();
 	if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual';
 	window.addEventListener('hashchange', () => {
 		render();
@@ -1585,9 +1872,14 @@ if (typeof module === 'object' && module.exports) {
 		applyScrapedPayloads,
 		autoSyncIntervalMilliseconds,
 		autoSyncBadgeState,
+		documentTitle,
 		formatAutoSyncInterval,
 		formatResetDateTime,
+		formatSyncCountdown,
+		formatSyncedAgo,
 		groupModelsByProvider,
+		headlinePaceContext,
+		headlineScopeOptions,
 		groupTrackers,
 		isAutoScrapedOpenAiDayArtifact,
 		isAutoScrapedValueOnlyLabelArtifact,
@@ -1599,18 +1891,23 @@ if (typeof module === 'object' && module.exports) {
 		loadPreferences,
 		mergePayloadIntoModels,
 		migrateStoredModels,
+		latestModelUpdate,
 		normalizedHistory,
+		overallPaceSummary,
 		pageFromHash,
 		paceDeltaContext,
 		paceCurveData,
 		projectedDepletionContext,
 		renderDashboard,
+		renderHeadlinePanel,
 		renderPage,
 		renderPaceGraphs,
 		renderRunwayView,
 		renderTrendChart,
 		reconcileTabSelections,
+		resolveHeadlineScope,
 		savePreferences,
+		syncCountdownState,
 		selectedTabIdsForPreferences,
 		setTrackerEnabled,
 		sendExtensionRequest,

@@ -6,32 +6,42 @@ const {
   applyScrapedPayloads,
   autoSyncIntervalMilliseconds,
   autoSyncBadgeState,
+  documentTitle,
   formatAutoSyncInterval,
   formatResetDateTime,
+  formatSyncCountdown,
+  formatSyncedAgo,
   groupModelsByProvider,
   groupTrackers,
+  headlinePaceContext,
+  headlineScopeOptions,
   isAutoScrapedOpenAiDayArtifact,
   isAutoScrapedValueOnlyLabelArtifact,
   isValueOnlyLabelPayloadArtifact,
   isValueOnlyMetricLabel,
   isOpenAiDayPayloadArtifact,
   isTrackerEnabled,
+  latestModelUpdate,
   loadModels,
   loadPreferences,
   mergePayloadIntoModels,
   migrateStoredModels,
   normalizedHistory,
+  overallPaceSummary,
   pageFromHash,
   paceDeltaContext,
   paceCurveData,
   projectedDepletionContext,
   reconcileTabSelections,
   renderDashboard,
+  renderHeadlinePanel,
   renderPage,
   renderPaceGraphs,
   renderRunwayView,
   renderTrendChart,
+  resolveHeadlineScope,
   savePreferences,
+  syncCountdownState,
   selectedTabIdsForPreferences,
   setTrackerEnabled,
   sendExtensionRequest,
@@ -156,10 +166,12 @@ test('legacy URL preferences migrate to provider-scoped descriptors without tab 
   }, storage);
 
   assert.deepEqual(saved, {
-    schemaVersion: 4,
+    schemaVersion: 5,
     autoSyncEnabled: true,
     autoSyncIntervalSeconds: 30,
     overviewPaceView: 'bars',
+    showHeadlineIndicator: true,
+    headlineScope: 'overall',
     providerTabs: {
       initialized: true,
       selectedTabs: [{
@@ -183,10 +195,12 @@ test('invalid or future preference shapes fall back safely', () => {
   });
 
   assert.deepEqual(loadPreferences(invalid), {
-    schemaVersion: 4,
+    schemaVersion: 5,
     autoSyncEnabled: false,
     autoSyncIntervalSeconds: 30,
     overviewPaceView: 'bars',
+    showHeadlineIndicator: true,
+    headlineScope: 'overall',
     providerTabs: { initialized: false, selectedTabs: [] }
   });
   assert.deepEqual(loadPreferences(future), loadPreferences(invalid));
@@ -321,7 +335,10 @@ test('auto-sync badge always reports off, waiting, or on truthfully', () => {
   assert.deepEqual(autoSyncBadgeState(true, true, 0), { state: 'waiting', label: 'Auto-sync waiting' });
   assert.deepEqual(autoSyncBadgeState(true, false, 1), { state: 'waiting', label: 'Auto-sync waiting' });
   assert.deepEqual(autoSyncBadgeState(true, true, 1), { state: 'on', label: 'Auto-sync on' });
-  assert.match(renderDashboard([], [], 'overview'), /data-auto-sync-state="off"[^>]*><i><\/i>Auto-sync off/);
+  assert.match(
+    renderDashboard([], [], 'overview'),
+    /data-auto-sync-state="off"[^>]*><i><\/i><span class="pill-label">Auto-sync off<\/span>/
+  );
 });
 
 test('legacy hashes resolve into the simplified Overview and Setup pages', () => {
@@ -342,13 +359,13 @@ test('the Overview pace view preference migrates and survives storage round trip
     providerTabs: { initialized: true, selectedTabs: [] }
   }, storage);
 
-  assert.equal(saved.schemaVersion, 4);
+  assert.equal(saved.schemaVersion, 5);
   assert.equal(saved.overviewPaceView, 'graph');
   assert.equal(loadPreferences(storage).overviewPaceView, 'graph');
 
   const runway = savePreferences({
     ...saved,
-    schemaVersion: 4,
+    schemaVersion: 5,
     overviewPaceView: 'runway'
   }, storage);
   assert.equal(runway.overviewPaceView, 'runway');
@@ -376,6 +393,179 @@ test('auto-sync interval preferences migrate, clamp, and format consistently', (
   assert.match(setup, /Auto-sync interval/);
   assert.match(setup, /<option value="30" selected>30s<\/option>/);
   assert.match(setup, /Auto-Sync Every 30s/);
+});
+
+function headlineFixture() {
+  // A burnt 5-hour session window next to a barely-touched weekly cap: the two
+  // weightings disagree loudly, which is the point of the assertions below.
+  return [
+    {
+      id: 'session',
+      provider: 'Claude',
+      metricLabel: 'Current session',
+      daysInCycle: 1,
+      hoursPerDay: 5,
+      totalHours: 5,
+      actualCum: 0.8,
+      flatCum: 0.4
+    },
+    {
+      id: 'weekly',
+      provider: 'Claude',
+      metricLabel: 'Weekly limit',
+      daysInCycle: 7,
+      hoursPerDay: 24,
+      totalHours: 168,
+      actualCum: 0.2,
+      flatCum: 0.1
+    },
+    {
+      id: 'daily',
+      provider: 'OpenAI',
+      metricLabel: 'Daily limit',
+      daysInCycle: 1,
+      hoursPerDay: 24,
+      totalHours: 24,
+      actualCum: 0.5,
+      flatCum: 0.5
+    }
+  ];
+}
+
+test('the headline average weights trackers by cycle length, not by count', () => {
+  const models = headlineFixture();
+  const summary = overallPaceSummary(models);
+
+  assert.equal(summary.available, true);
+  assert.equal(summary.count, 3);
+  assert.equal(summary.weightHours, 197);
+  // (5*0.8 + 168*0.2 + 24*0.5) / 197 and (5*0.4 + 168*0.1 + 24*0.5) / 197
+  assert.equal(summary.actual.toFixed(4), (49.6 / 197).toFixed(4));
+  assert.equal(summary.ideal.toFixed(4), (30.8 / 197).toFixed(4));
+  assert.equal(summary.delta.toFixed(4), (18.8 / 197).toFixed(4));
+  // An equal-weight mean would read +20 points; cycle weighting reports +10.
+  assert.equal(paceDeltaContext(summary.actual, summary.ideal).shortLabel, '+10%');
+
+  assert.deepEqual(overallPaceSummary([]), {
+    available: false, count: 0, weightHours: 0, actual: 0, ideal: 0, delta: 0
+  });
+  assert.equal(overallPaceSummary([{ id: 'no-cycle', daysInCycle: 0, hoursPerDay: 0 }]).available, false);
+});
+
+test('the headline scope selects overall, a provider, or a single tracker', () => {
+  const models = headlineFixture();
+
+  assert.deepEqual(resolveHeadlineScope(models, 'overall').models.map((m) => m.id), ['session', 'weekly', 'daily']);
+  assert.equal(resolveHeadlineScope(models, 'overall').label, 'Overall');
+
+  const claude = resolveHeadlineScope(models, 'provider:claude');
+  assert.equal(claude.label, 'Claude');
+  assert.deepEqual(claude.models.map((m) => m.id), ['session', 'weekly']);
+  assert.equal(overallPaceSummary(claude.models).weightHours, 173);
+
+  const session = resolveHeadlineScope(models, 'tracker:session');
+  assert.equal(session.label, 'Claude - Current Session');
+  assert.deepEqual(session.models.map((m) => m.id), ['session']);
+
+  const options = headlineScopeOptions(models);
+  assert.deepEqual(options.providers.map((entry) => entry.value), ['provider:claude', 'provider:openai']);
+  assert.deepEqual(options.trackers.map((entry) => entry.value), ['tracker:session', 'tracker:weekly', 'tracker:daily']);
+});
+
+test('an unavailable headline scope falls back to overall instead of blanking', () => {
+  const models = headlineFixture();
+
+  for (const missing of ['tracker:deleted', 'provider:gemini', 'nonsense', '', null]) {
+    const scope = resolveHeadlineScope(models, missing);
+    assert.equal(scope.scope, 'overall');
+    assert.equal(scope.label, 'Overall');
+    assert.equal(scope.models.length, 3);
+  }
+  assert.equal(resolveHeadlineScope(models, 'tracker:deleted').resolved, false);
+  assert.equal(resolveHeadlineScope(models, 'overall').resolved, true);
+});
+
+test('the page title carries the headline delta only while the indicator is on', () => {
+  const models = headlineFixture();
+  const on = { schemaVersion: 5, showHeadlineIndicator: true, headlineScope: 'overall' };
+
+  assert.equal(documentTitle(models, on), '+10% — Too Many Tokens');
+  assert.equal(
+    documentTitle(models, { ...on, headlineScope: 'tracker:session' }),
+    '+40% — Too Many Tokens'
+  );
+  assert.equal(
+    documentTitle(models, { ...on, headlineScope: 'tracker:daily' }),
+    '0% — Too Many Tokens'
+  );
+  assert.equal(documentTitle(models, { ...on, showHeadlineIndicator: false }), 'Too Many Tokens');
+  assert.equal(documentTitle([], on), 'Too Many Tokens');
+});
+
+test('the headline panel renders on Overview and hides when switched off', () => {
+  const models = headlineFixture();
+  const overview = renderPage('overview', models, models);
+
+  assert.match(overview, /class="panel headline-panel"/);
+  assert.match(overview, /headline-delta warning">\+10%/);
+  assert.match(overview, /Overall<\/span>/);
+  assert.match(overview, /197h of quota/);
+  assert.ok(overview.indexOf('headline-panel') < overview.indexOf('overview-pace'));
+
+  assert.equal(renderHeadlinePanel([]), '');
+  assert.equal(
+    headlinePaceContext(models, { schemaVersion: 5, showHeadlineIndicator: false }).available,
+    false
+  );
+
+  const setup = renderPage('setup', models, models);
+  assert.match(setup, /data-action="toggle-headline"/);
+  assert.match(setup, /data-headline-scope/);
+  assert.match(setup, /<option value="tracker:session" >/);
+  assert.match(setup, /<optgroup label="Provider">/);
+});
+
+test('the header reports the auto-sync countdown and how stale the numbers are', () => {
+  assert.equal(formatSyncCountdown(0), '0s');
+  assert.equal(formatSyncCountdown(-5000), '0s');
+  assert.equal(formatSyncCountdown(24_000), '24s');
+  assert.equal(formatSyncCountdown(59_000), '59s');
+  assert.equal(formatSyncCountdown(59_400), '1:00');
+  assert.equal(formatSyncCountdown(90_000), '1:30');
+  assert.equal(formatSyncCountdown(600_000), '10:00');
+  assert.equal(formatSyncCountdown('nope'), '—');
+
+  const now = Date.parse('2026-08-16T12:00:00.000Z');
+  assert.equal(formatSyncedAgo(null, now), 'Never synced');
+  assert.equal(formatSyncedAgo('not a date', now), 'Never synced');
+  assert.equal(formatSyncedAgo(now - 3_000, now), 'Synced just now');
+  assert.equal(formatSyncedAgo(now - 42_000, now), 'Synced 42s ago');
+  assert.equal(formatSyncedAgo(now - 5 * 60_000, now), 'Synced 5m ago');
+  assert.equal(formatSyncedAgo(now - 3 * 3_600_000, now), 'Synced 3h ago');
+  assert.equal(formatSyncedAgo(now - 50 * 3_600_000, now), 'Synced 2d ago');
+
+  assert.deepEqual(syncCountdownState(false, now + 30_000, false, now), { state: 'idle', label: '' });
+  assert.deepEqual(syncCountdownState(true, null, false, now), { state: 'idle', label: '' });
+  assert.deepEqual(syncCountdownState(true, now + 30_000, false, now), {
+    state: 'counting', label: 'next in 30s'
+  });
+  assert.deepEqual(syncCountdownState(true, now + 30_000, true, now), {
+    state: 'syncing', label: 'syncing now'
+  });
+
+  const header = renderDashboard([], [], 'overview');
+  assert.match(header, /data-header-status/);
+  assert.match(header, /data-sync-age[^>]*>Never synced</);
+});
+
+test('last synced comes from the newest tracker timestamp', () => {
+  assert.equal(latestModelUpdate([]), null);
+  assert.equal(latestModelUpdate([{ lastUpdatedAt: '' }, { lastUpdatedAt: 'nope' }]), null);
+  assert.equal(latestModelUpdate([
+    { lastUpdatedAt: '2026-08-16T10:00:00.000Z' },
+    { lastUpdatedAt: '2026-08-16T11:30:00.000Z' },
+    { lastUpdatedAt: 'unparseable' }
+  ]), Date.parse('2026-08-16T11:30:00.000Z'));
 });
 
 test('tracker visibility defaults on and can be persisted off independently', () => {
