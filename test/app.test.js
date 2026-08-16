@@ -4,11 +4,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   applyScrapedPayloads,
-  autoSyncIntervalMilliseconds,
   autoSyncBadgeState,
   documentTitle,
-  formatAutoSyncInterval,
+  formatRefreshInterval,
   formatResetDateTime,
+  isRefreshPlanRunning,
+  normalizeRefreshCount,
+  normalizeRefreshIntervalSeconds,
+  refreshIntervalMilliseconds,
+  renderRefreshPlanPanel,
+  sanitizeRefreshPlan,
   formatSyncCountdown,
   formatSyncedAgo,
   groupModelsByProvider,
@@ -166,12 +171,11 @@ test('legacy URL preferences migrate to provider-scoped descriptors without tab 
   }, storage);
 
   assert.deepEqual(saved, {
-    schemaVersion: 5,
-    autoSyncEnabled: true,
-    autoSyncIntervalSeconds: 900,
+    schemaVersion: 6,
     overviewPaceView: 'bars',
     showHeadlineIndicator: true,
     headlineScope: 'overall',
+    refreshPlan: { intervalSeconds: 900, totalRefreshes: 5, remaining: 0, nextAt: null },
     providerTabs: {
       initialized: true,
       selectedTabs: [{
@@ -195,12 +199,11 @@ test('invalid or future preference shapes fall back safely', () => {
   });
 
   assert.deepEqual(loadPreferences(invalid), {
-    schemaVersion: 5,
-    autoSyncEnabled: false,
-    autoSyncIntervalSeconds: 900,
+    schemaVersion: 6,
     overviewPaceView: 'bars',
     showHeadlineIndicator: true,
     headlineScope: 'overall',
+    refreshPlan: { intervalSeconds: 900, totalRefreshes: 5, remaining: 0, nextAt: null },
     providerTabs: { initialized: false, selectedTabs: [] }
   });
   assert.deepEqual(loadPreferences(future), loadPreferences(invalid));
@@ -330,14 +333,31 @@ test('turning off a redirected provider selection removes its healed identity', 
   assert.deepEqual(selectedTabIdsForPreferences(tabs, update.preferences), []);
 });
 
-test('auto-sync badge always reports off, waiting, or on truthfully', () => {
-  assert.deepEqual(autoSyncBadgeState(false, false, 0), { state: 'off', label: 'Auto-sync off' });
-  assert.deepEqual(autoSyncBadgeState(true, true, 0), { state: 'waiting', label: 'Auto-sync waiting' });
-  assert.deepEqual(autoSyncBadgeState(true, false, 1), { state: 'waiting', label: 'Auto-sync waiting' });
-  assert.deepEqual(autoSyncBadgeState(true, true, 1), { state: 'on', label: 'Auto-sync on' });
+test('the refresh badge reports off, paused, or running with its remaining count', () => {
+  const stopped = { intervalSeconds: 900, totalRefreshes: 5, remaining: 0, nextAt: null };
+  const running = { intervalSeconds: 900, totalRefreshes: 5, remaining: 3, nextAt: 1 };
+
+  assert.deepEqual(autoSyncBadgeState(stopped, false, 0), { state: 'off', label: 'Refreshes off' });
+  // A plan with a count but no scheduled time is not running, and must not claim to be.
+  assert.deepEqual(
+    autoSyncBadgeState({ ...running, nextAt: null }, true, 1),
+    { state: 'off', label: 'Refreshes off' }
+  );
+  assert.deepEqual(
+    autoSyncBadgeState(running, true, 0),
+    { state: 'waiting', label: 'Refreshes paused · 3 of 5 left' }
+  );
+  assert.deepEqual(
+    autoSyncBadgeState(running, false, 1),
+    { state: 'waiting', label: 'Refreshes paused · 3 of 5 left' }
+  );
+  assert.deepEqual(
+    autoSyncBadgeState(running, true, 1),
+    { state: 'on', label: 'Refreshing · 3 of 5 left' }
+  );
   assert.match(
     renderDashboard([], [], 'overview'),
-    /data-auto-sync-state="off"[^>]*><i><\/i><span class="pill-label">Auto-sync off<\/span>/
+    /data-auto-sync-state="off"[^>]*><i><\/i><span class="pill-label">Refreshes off<\/span>/
   );
 });
 
@@ -359,51 +379,109 @@ test('the Overview pace view preference migrates and survives storage round trip
     providerTabs: { initialized: true, selectedTabs: [] }
   }, storage);
 
-  assert.equal(saved.schemaVersion, 5);
+  assert.equal(saved.schemaVersion, 6);
   assert.equal(saved.overviewPaceView, 'graph');
   assert.equal(loadPreferences(storage).overviewPaceView, 'graph');
 
   const runway = savePreferences({
     ...saved,
-    schemaVersion: 5,
+    schemaVersion: 6,
     overviewPaceView: 'runway'
   }, storage);
   assert.equal(runway.overviewPaceView, 'runway');
   assert.equal(loadPreferences(storage).overviewPaceView, 'runway');
 });
 
-test('auto-sync interval preferences migrate, clamp, and format consistently', () => {
+test('refresh interval and count clamp to the bounds the page is allowed to ask for', () => {
+  // The page can only ever ask for slower and fewer. Anything outside the
+  // bounds clamps inward rather than being honoured.
+  assert.equal(normalizeRefreshIntervalSeconds(30), 300);
+  assert.equal(normalizeRefreshIntervalSeconds(1), 300);
+  assert.equal(normalizeRefreshIntervalSeconds(900), 900);
+  assert.equal(normalizeRefreshIntervalSeconds(86_400), 3600);
+  assert.equal(normalizeRefreshIntervalSeconds('nonsense'), 900);
+
+  assert.equal(normalizeRefreshCount(0), 1);
+  assert.equal(normalizeRefreshCount(-5), 1);
+  assert.equal(normalizeRefreshCount(7), 7);
+  assert.equal(normalizeRefreshCount(1000), 10);
+  assert.equal(normalizeRefreshCount('nonsense'), 5);
+
+  assert.equal(formatRefreshInterval(30), '5m');
+  assert.equal(formatRefreshInterval(900), '15m');
+  assert.equal(formatRefreshInterval(7200), '60m');
+  assert.equal(refreshIntervalMilliseconds(30), 300000);
+  assert.equal(refreshIntervalMilliseconds(1800), 1800000);
+});
+
+test('a stored refresh plan can never resurrect an unbounded loop', () => {
+  const plan = (value) => sanitizeRefreshPlan(value);
+
+  // Both halves are required to count as running.
+  assert.equal(isRefreshPlanRunning(plan({ remaining: 4, nextAt: 123 })), true);
+  assert.equal(isRefreshPlanRunning(plan({ remaining: 4, nextAt: null })), false);
+  assert.equal(isRefreshPlanRunning(plan({ remaining: 0, nextAt: 123 })), false);
+  assert.equal(isRefreshPlanRunning(plan({})), false);
+
+  // A hand-edited count above the cap is clamped, not honoured.
+  assert.deepEqual(plan({ totalRefreshes: 9999, remaining: 9999, nextAt: 123 }), {
+    intervalSeconds: 900, totalRefreshes: 10, remaining: 10, nextAt: 123
+  });
+  // Remaining can never exceed the total it was drawn from.
+  assert.equal(plan({ totalRefreshes: 3, remaining: 50, nextAt: 123 }).remaining, 3);
+  // A sub-floor interval clamps up even inside a live plan.
+  assert.equal(plan({ intervalSeconds: 5, remaining: 2, nextAt: 123 }).intervalSeconds, 300);
+  // Losing nextAt zeroes the count rather than leaving a plan that never ends.
+  assert.deepEqual(plan({ remaining: 4, nextAt: 'soon' }), {
+    intervalSeconds: 900, totalRefreshes: 5, remaining: 0, nextAt: null
+  });
+});
+
+test('upgrading from perpetual auto-sync does not start a run', () => {
   const storage = createStorage();
-  const saved = savePreferences({
-    schemaVersion: 4,
+  // Schema 5 with auto-sync switched on and polling every 5 minutes.
+  const migrated = savePreferences({
+    schemaVersion: 5,
     autoSyncEnabled: true,
-    autoSyncIntervalSeconds: 1800,
-    providerTabs: { initialized: false, selectedTabs: [] }
+    autoSyncIntervalSeconds: 300,
+    providerTabs: { initialized: true, selectedTabs: [] }
   }, storage);
 
-  assert.equal(saved.autoSyncIntervalSeconds, 1800);
-  assert.equal(loadPreferences(storage).autoSyncIntervalSeconds, 1800);
+  assert.equal(isRefreshPlanRunning(migrated.refreshPlan), false, 'upgrading must not begin reloading pages');
+  assert.equal(migrated.refreshPlan.remaining, 0);
+  assert.equal(migrated.refreshPlan.nextAt, null);
+  // The old cadence is kept as the default for the next run the user starts.
+  assert.equal(migrated.refreshPlan.intervalSeconds, 300);
+  assert.equal(Object.hasOwn(migrated, 'autoSyncEnabled'), false);
+  assert.equal(isRefreshPlanRunning(loadPreferences(storage).refreshPlan), false);
+});
 
-  // Every sync reloads a provider page, so the interval only ever clamps
-  // toward less frequent. A stored 30s from before the floor existed migrates
-  // up to 5m on load rather than continuing to hammer the provider.
-  assert.equal(formatAutoSyncInterval(30), '5m');
-  assert.equal(formatAutoSyncInterval(120), '5m');
-  assert.equal(formatAutoSyncInterval(5), '5m');
-  assert.equal(formatAutoSyncInterval(900), '15m');
-  assert.equal(formatAutoSyncInterval(7200), '60m');
-  assert.equal(autoSyncIntervalMilliseconds(30), 300000);
-  assert.equal(autoSyncIntervalMilliseconds(1800), 1800000);
-  assert.equal(
-    savePreferences({ schemaVersion: 4, autoSyncIntervalSeconds: 30 }, createStorage()).autoSyncIntervalSeconds,
-    300
+test('the Overview refresh control offers only bounded choices and reports progress', () => {
+  const stopped = renderRefreshPlanPanel(
+    { intervalSeconds: 900, totalRefreshes: 5, remaining: 0, nextAt: null },
+    Date.parse('2026-08-16T10:00:00.000Z')
   );
-  const setup = renderPage('setup', [], []);
-  assert.match(setup, /data-auto-sync-interval/);
-  assert.match(setup, /Auto-sync interval/);
-  assert.match(setup, /<option value="900" selected>15m<\/option>/);
-  assert.match(setup, /Auto-Sync Every 15m/);
-  assert.doesNotMatch(setup, /<option value="(?:30|60|120)"/);
+  assert.match(stopped, /data-action="refresh-plan-start"/);
+  assert.doesNotMatch(stopped, /refresh-plan-stop/);
+  assert.match(stopped, /Stopped · 5 refreshes every 15m when started/);
+  assert.match(stopped, /stops on its own/);
+
+  // Nothing faster than 5 minutes or longer than 10 refreshes is selectable.
+  const intervals = [...stopped.matchAll(/<option value="(\d+)"[^>]*>\d+m</g)].map((m) => Number(m[1]));
+  assert.deepEqual(intervals, [300, 600, 900, 1800, 3600]);
+  const counts = [...stopped.matchAll(/<option value="(\d+)"[^>]*>(\d+)</g)]
+    .filter((m) => m[1] === m[2]).map((m) => Number(m[1]));
+  assert.deepEqual(counts, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+  const now = Date.parse('2026-08-16T10:00:00.000Z');
+  const running = renderRefreshPlanPanel(
+    { intervalSeconds: 900, totalRefreshes: 10, remaining: 7, nextAt: now + 90_000 },
+    now
+  );
+  assert.match(running, /Refresh 4 of 10 · next in 1:30/);
+  assert.match(running, /data-action="refresh-plan-stop"/);
+  assert.match(running, /data-action="refresh-plan-reset"/);
+  assert.doesNotMatch(running, /data-action="refresh-plan-start"/);
 });
 
 function headlineFixture() {

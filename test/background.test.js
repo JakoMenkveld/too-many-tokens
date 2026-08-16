@@ -1,9 +1,12 @@
 'use strict';
 
 const test = require('node:test');
+const { beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const {
+  SCAN_COOLDOWN_MS,
+  claimScanAllowance,
   collectPageSnapshot,
   collectStablePageSnapshot,
   handleRuntimeMessage,
@@ -13,10 +16,16 @@ const {
   isTrustedTrackerSender,
   reloadTabAndWait,
   listScannableTabs,
+  resetScanCooldowns,
+  scanCooldownKey,
   scanTab,
   scanTabIds
 } = require('../chrome-extension/background.js');
 const trackerOrigins = require('../chrome-extension/tracker-origins.js');
+
+// The scan cooldown is intentionally process-wide state, so it leaks between
+// tests unless cleared. Each test starts with a fresh allowance.
+beforeEach(() => resetScanCooldowns());
 
 const FAST_SCAN_OPTIONS = {
   settleMs: 0,
@@ -392,6 +401,92 @@ test('a tab scan returns every quota metric while preserving the first result', 
     'weekly-fable'
   ]);
   assert.ok(scan.results.every(({ tabId }) => tabId === 12));
+});
+
+test('the extension refuses to reload the same page inside the cooldown', async () => {
+  assert.equal(SCAN_COOLDOWN_MS, 5 * 60 * 1000);
+
+  let reloads = 0;
+  const chromeApi = {
+    tabs: {
+      get: async () => ({ id: 31, title: 'Claude Usage', url: 'https://claude.ai/settings/usage', status: 'complete' }),
+      reload: async () => { reloads += 1; }
+    },
+    scripting: {
+      executeScript: async () => [{
+        result: {
+          body: 'Current session\n53% used',
+          page: 'https://claude.ai/settings/usage',
+          title: 'Claude Usage'
+        }
+      }]
+    }
+  };
+
+  const start = Date.parse('2026-08-16T10:00:00.000Z');
+  const first = await scanTab(31, chromeApi, start, FAST_SCAN_OPTIONS);
+  assert.equal(first.error, null);
+  assert.equal(reloads, 1);
+
+  // Inside the window the provider is never contacted at all.
+  const blocked = await scanTab(31, chromeApi, start + 60_000, FAST_SCAN_OPTIONS);
+  assert.equal(reloads, 1, 'a rate-limited scan must not reload the provider page');
+  assert.match(blocked.error, /rate limited/i);
+  assert.equal(blocked.retryAfterMs, 4 * 60 * 1000);
+  assert.deepEqual(blocked.results, []);
+
+  const allowed = await scanTab(31, chromeApi, start + SCAN_COOLDOWN_MS, FAST_SCAN_OPTIONS);
+  assert.equal(allowed.error, null);
+  assert.equal(reloads, 2);
+});
+
+test('the cooldown is keyed on the page, so reopening the tab grants no new allowance', async () => {
+  // Same page, different tab ID and a noisier URL: still one allowance.
+  assert.equal(
+    scanCooldownKey('https://CLAUDE.ai/settings/usage/?ref=1#x'),
+    scanCooldownKey('https://claude.ai/settings/usage')
+  );
+  assert.notEqual(
+    scanCooldownKey('https://claude.ai/settings/usage'),
+    scanCooldownKey('https://claude.ai/settings/daily')
+  );
+  assert.equal(scanCooldownKey('chrome://settings'), '');
+
+  const at = Date.parse('2026-08-16T10:00:00.000Z');
+  assert.deepEqual(
+    await claimScanAllowance('https://claude.ai/settings/usage', {}, at),
+    { allowed: true, retryAfterMs: 0 }
+  );
+  const reopened = await claimScanAllowance('https://claude.ai/settings/usage?reopened=1', {}, at + 1000);
+  assert.equal(reopened.allowed, false);
+
+  // A different page is independent.
+  assert.equal(
+    (await claimScanAllowance('https://claude.ai/settings/daily', {}, at + 1000)).allowed,
+    true
+  );
+});
+
+test('the cooldown survives service worker eviction via session storage', async () => {
+  // The worker restarting is the normal case in MV3, so an in-memory-only limit
+  // would reset every ~30 idle seconds. Session storage is what carries it.
+  const store = new Map();
+  const chromeApi = {
+    storage: {
+      session: {
+        get: async (key) => (store.has(key) ? { [key]: store.get(key) } : {}),
+        set: async (entries) => { Object.entries(entries).forEach(([k, v]) => store.set(k, v)); }
+      }
+    }
+  };
+
+  const at = Date.parse('2026-08-16T10:00:00.000Z');
+  assert.equal((await claimScanAllowance('https://chatgpt.com/codex/settings/usage', chromeApi, at)).allowed, true);
+  assert.ok(store.size > 0, 'the claim must be persisted, not just held in memory');
+
+  resetScanCooldowns(); // simulate the service worker being evicted
+  const afterEviction = await claimScanAllowance('https://chatgpt.com/codex/settings/usage', chromeApi, at + 1000);
+  assert.equal(afterEviction.allowed, false, 'a restarted worker must still honour the cooldown');
 });
 
 test('multi-tab scans flatten all metric results', async () => {

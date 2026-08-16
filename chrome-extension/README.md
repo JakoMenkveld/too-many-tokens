@@ -20,7 +20,7 @@ The dashboard origins it will talk to are listed in `tracker-origins.js`; see th
 2. Open `http://localhost:5074`.
 3. Select the dashboard's circular-arrows sync icon. On first use, every supported tab is selected and scanned automatically.
 4. Open the dashboard's **Provider sync** page when you want to change the selected windows.
-5. Optionally start auto-sync and choose its refresh interval; the dashboard asks the extension to refresh and rescan the current selection on that schedule.
+5. Optionally start a bounded run of scheduled refreshes from the dashboard's Overview page; it asks the extension to refresh and rescan the current selection at most 10 times, then stops. The extension enforces its own 5-minute cooldown per provider page regardless of what the dashboard requests, and returns a rate-limit error instead of reloading.
 
 Before scraping, the extension reloads each selected provider tab, waits for the page load and dynamic text to settle, then reads it. The tab does not need to be visible or focused, and one provider tab timing out does not prevent the others from returning results.
 

@@ -21,6 +21,98 @@ const SNAPSHOT_STABILITY_TIMEOUT_MS = 3_000;
 const SNAPSHOT_POLL_MS = 200;
 const SNAPSHOT_STABLE_DURATION_MS = 750;
 
+// Every scan reloads a provider page, so the extension refuses to scan the same
+// page more often than this no matter what the dashboard asks for. The page-side
+// controls are bounded too, but the page is the part an edited script or any
+// trusted tracker origin could change; this is the limit that survives that.
+// Raising it deliberately means editing this file -- which is the point.
+const SCAN_COOLDOWN_MS = 5 * 60 * 1000;
+const SCAN_COOLDOWN_STORAGE_KEY = 'scanCooldowns';
+const SCAN_COOLDOWN_MAX_ENTRIES = 50;
+
+// Used only when chrome.storage.session is unavailable. In the extension it
+// always is, and session storage is what keeps the limit alive across service
+// worker eviction -- a plain module variable would reset every ~30 idle seconds.
+const scanCooldownFallback = new Map();
+
+// Keyed on the normalized URL rather than the tab ID, so closing and reopening
+// the tab does not hand out a fresh allowance.
+function scanCooldownKey(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    return `${parsed.protocol}//${parsed.host.toLowerCase()}${pathname.toLowerCase()}`;
+  } catch (error) {
+    return '';
+  }
+}
+
+async function readScanCooldowns(chromeApi) {
+  const store = chromeApi?.storage?.session;
+  if (!store?.get) return new Map(scanCooldownFallback);
+  try {
+    const stored = await store.get(SCAN_COOLDOWN_STORAGE_KEY);
+    const entries = stored?.[SCAN_COOLDOWN_STORAGE_KEY];
+    return entries && typeof entries === 'object' ? new Map(Object.entries(entries)) : new Map();
+  } catch (error) {
+    return new Map(scanCooldownFallback);
+  }
+}
+
+async function writeScanCooldowns(chromeApi, cooldowns, nowValue) {
+  const fresh = [...cooldowns.entries()]
+    .filter(([, at]) => Number.isFinite(Number(at)) && nowValue - Number(at) < SCAN_COOLDOWN_MS)
+    .sort((left, right) => Number(right[1]) - Number(left[1]))
+    .slice(0, SCAN_COOLDOWN_MAX_ENTRIES);
+
+  scanCooldownFallback.clear();
+  fresh.forEach(([key, at]) => scanCooldownFallback.set(key, at));
+
+  const store = chromeApi?.storage?.session;
+  if (!store?.set) return;
+  try {
+    await store.set({ [SCAN_COOLDOWN_STORAGE_KEY]: Object.fromEntries(fresh) });
+  } catch (error) {
+    // Session storage being unavailable must not turn into an unlimited scanner;
+    // the in-memory fallback above still holds the limit for this worker.
+  }
+}
+
+function describeCooldownWait(milliseconds) {
+  const seconds = Math.max(1, Math.ceil(milliseconds / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${String(seconds % 60).padStart(2, '0')}s`;
+}
+
+async function claimScanAllowance(url, chromeApi, nowValue) {
+  const key = scanCooldownKey(url);
+  if (!key) return { allowed: true, retryAfterMs: 0 };
+
+  // Callers pass either a Date or epoch milliseconds; store one type.
+  const parsedNow = Number(nowValue);
+  const at = Number.isFinite(parsedNow) ? parsedNow : Date.now();
+  const cooldowns = await readScanCooldowns(chromeApi);
+  const last = Number(cooldowns.get(key));
+  if (Number.isFinite(last)) {
+    const elapsed = at - last;
+    if (elapsed >= 0 && elapsed < SCAN_COOLDOWN_MS) {
+      return { allowed: false, retryAfterMs: SCAN_COOLDOWN_MS - elapsed };
+    }
+  }
+
+  cooldowns.set(key, at);
+  await writeScanCooldowns(chromeApi, cooldowns, at);
+  return { allowed: true, retryAfterMs: 0 };
+}
+
+// Test seam only. There is deliberately no message type that clears the
+// cooldown, so the dashboard page cannot reset its own limit.
+function resetScanCooldowns() {
+  scanCooldownFallback.clear();
+}
+
 function collectPageSnapshot() {
   return {
     body: String(document.body?.innerText || '').slice(0, 250_000),
@@ -199,6 +291,17 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
       return { result: null, results: [], error: 'The selected tab cannot be scanned.' };
     }
 
+    // Claimed before the reload, so a rejected scan never touches the provider.
+    const allowance = await claimScanAllowance(tab.url, chromeApi, nowValue);
+    if (!allowance.allowed) {
+      return {
+        result: null,
+        results: [],
+        error: `Rate limited: this page was scanned less than 5 minutes ago. Next scan in ${describeCooldownWait(allowance.retryAfterMs)}.`,
+        retryAfterMs: allowance.retryAfterMs
+      };
+    }
+
     const reloadForScan = typeof options.reloadTabAndWait === 'function'
       ? options.reloadTabAndWait
       : reloadTabAndWait;
@@ -325,7 +428,13 @@ async function scanTabIds(tabIds, chromeApi = globalThis.chrome, nowValue = Date
       Array.isArray(scan.results) ? scan.results : scan.result ? [scan.result] : []
     )),
     errors: scans.flatMap((scan, index) => (
-      scan.error ? [{ tabId: uniqueIds[index], message: scan.error }] : []
+      scan.error
+        ? [{
+          tabId: uniqueIds[index],
+          message: scan.error,
+          ...(Number.isFinite(scan.retryAfterMs) ? { retryAfterMs: scan.retryAfterMs } : {})
+        }]
+        : []
     ))
   };
 }
@@ -409,9 +518,12 @@ if (globalThis.chrome?.action?.onClicked) {
 
 if (typeof module === 'object' && module.exports) {
   module.exports = {
+    SCAN_COOLDOWN_MS,
     TRACKER_URL,
+    claimScanAllowance,
     collectPageSnapshot,
     collectStablePageSnapshot,
+    scanCooldownKey,
     getAllUsageFromTabs,
     handleRuntimeMessage,
     isScannableTab,
@@ -421,6 +533,7 @@ if (typeof module === 'object' && module.exports) {
     listScannableTabs,
     openOrFocusTracker,
     reloadTabAndWait,
+    resetScanCooldowns,
     scanTab,
     scanTabIds
   };

@@ -13,7 +13,7 @@ Know on Tuesday whether you're going to blow through your Claude or ChatGPT week
 > To read your quota numbers, the extension **reloads your provider usage page and
 > then reads the rendered text**. It does not passively observe a page you loaded
 > yourself — it issues the page load itself, from a script, and repeats it on a
-> timer when auto-sync is on.
+> timer when you start a run of scheduled refreshes.
 >
 > Both providers prohibit exactly that:
 >
@@ -31,9 +31,10 @@ Know on Tuesday whether you're going to blow through your Claude or ChatGPT week
 > in your own browser. The conflict is with the automated-access clauses, not with
 > the abuse or security clauses.
 >
-> **Auto-sync is off by default**, and nothing is read until you ask for it. When
-> you do turn it on, the shortest interval is 5 minutes; see
-> [Auto-sync and request volume](#auto-sync-and-request-volume).
+> **Nothing repeats in the background.** There is no always-on polling mode. A
+> refresh run is something you start explicitly, it is capped at 10 refreshes no
+> closer together than 5 minutes, and it stops on its own — see
+> [Scheduled refreshes and request volume](#scheduled-refreshes-and-request-volume).
 >
 > Not affiliated with, endorsed by, or sponsored by Anthropic or OpenAI. "Claude"
 > and "ChatGPT" are their respective owners' trademarks, used here only to say what
@@ -88,7 +89,7 @@ See [chrome-extension/README.md](chrome-extension/README.md) for permissions, co
 1. Open one or more provider usage pages in Chrome (currently Claude and OpenAI/ChatGPT — see [Supported providers](#supported-providers)).
 2. On the dashboard, select the circular-arrows sync icon. The first sync selects every supported open tab, reloads the selected provider pages, waits for their current content, and scans them.
 3. Review the generated pace rows on Overview. Each row's label, used percentage, ideal-by-now percentage, and reset countdown are filled from the provider page.
-4. Open **Setup** to select provider tabs, choose an auto-sync refresh interval, and show or hide individual readings. These choices survive hard refreshes and page closes; auto-sync resumes when the dashboard opens again.
+4. Open **Setup** to select provider tabs and show or hide individual readings. Start a bounded run of scheduled refreshes from **Overview**. These choices survive hard refreshes and page closes; a run in progress resumes with the count it had left.
 5. Use **Manual Overrides** only when a provider changes its wording or you want a custom tracker.
 
 On a typical Claude usage page, a single sync creates three independent trackers: the five-hour current session, the all-model weekly limit, and the named-model weekly limit. Text such as `82% remaining` is stored and displayed as `18% used`.
@@ -112,13 +113,13 @@ The extension only asks Chrome for access to those specific sites — not to eve
 - Multi-metric extraction: one Claude page can produce separate **Current session**, **All models**, and model-specific weekly limits.
 - Percent-based and token-based run-rate calculations.
 - Cycle pacing, remaining budget, token projection, and cost projection.
-- Chrome tab discovery, explicit tab selection, one-off scans, and configurable auto-sync. Loading provider tabs remain visible while discovery is in progress. Each scan reloads the selected provider pages before reading them, including background tabs.
+- Chrome tab discovery, explicit tab selection, one-off scans, and bounded runs of scheduled refreshes that stop on their own. Loading provider tabs remain visible while discovery is in progress. Each scan reloads the selected provider pages before reading them, including background tabs.
 - Correlated extension requests using request IDs and explicit error responses.
 - Scraper normalization for used or remaining percentages, token ratios, numeric suffixes such as `K`, `M`, and `B`, and reset schedules.
 - Stable update identity based on the source URL plus quota metric, so several limits from one page remain independent and repeated scans update the right entry.
 - Automatic session/daily/weekly cycle setup and cycle-hour derivation from parsed reset information.
 - Bounded local usage history with five-minute sample coalescing for actual-pace graphs.
-- Durable local preferences for tracker visibility, manual edits, Overview display mode, selected provider tabs, and auto-sync. Known Claude and OpenAI usage routes survive provider redirects without selecting unrelated tabs; auto-sync resumes after a hard refresh or page reopen and waits for temporarily closed provider tabs to return.
+- Durable local preferences for tracker visibility, manual edits, Overview display mode, selected provider tabs, and the refresh run. Known Claude and OpenAI usage routes survive provider redirects without selecting unrelated tabs; a run in progress resumes after a hard refresh or page reopen and waits for temporarily closed provider tabs to return.
 
 ## Permissions and safety boundaries
 
@@ -159,25 +160,37 @@ npm run check
 
 Provider usage pages are not standardized and can change without notice. The scraper uses text and metadata heuristics, so a scan can occasionally require a correction. Manual setup remains available as a collapsed fallback; it is not required for recognized session, daily, or weekly layouts.
 
-## Auto-sync and request volume
+## Scheduled refreshes and request volume
 
-Every sync **reloads** the selected provider tab and then reads it. That is a real
-page load against the provider, so the interval is a request-volume decision, not
-just a freshness one.
+Every refresh **reloads** the selected provider tab and then reads it. That is a
+real page load against the provider, so this is a request-volume decision, not just
+a freshness one. There is deliberately no "poll forever" mode.
 
-- Auto-sync is **off by default**. Left alone, this tool reads a provider page only
-  when you press Sync.
-- With auto-sync on, the interval floor is **5 minutes** and the default is
-  **15 minutes** — roughly 96 reloads a day per tab. Intervals shorter than the
-  floor are clamped up when preferences load, so a setting saved by an older
-  version cannot keep polling faster.
-- The ceiling is 60 minutes. The control only lets you go slower, never faster.
+**A run is bounded and explicit.** On **Overview**, pick an interval and how many
+refreshes, then press Start. The run performs at most that many refreshes and then
+stops by itself. You can Stop or Restart it at any time, and changing either
+setting restarts the run with the new values.
 
-Quota figures move slowly. A tighter interval costs the provider real requests and
-tells you nothing you would not learn a few minutes later.
+- **Interval:** minimum 5 minutes, default 15, maximum 60. The control only offers
+  slower, never faster.
+- **Count:** maximum 10 refreshes per run. A worst-case run is therefore 10 page
+  loads over 50 minutes, after which nothing further happens until you start
+  another one.
+- **Starting a run does not scan.** The first refresh happens one interval later.
+  Press **Sync** in the header if you want a single reading immediately.
+- A run in progress survives reloading the dashboard and resumes with the count it
+  had left. It cannot outlive that count.
 
-If you want the lowest-footprint setup, leave auto-sync off and press Sync when you
-actually want to know.
+**Both halves are enforced, and the extension does not trust the page.**
+`chrome-extension/background.js` refuses to reload the same provider page more than
+once every 5 minutes, whatever the dashboard asks for, and returns an explicit
+rate-limit error instead. The cooldown is keyed on the page URL, so reopening the
+tab grants no fresh allowance, and it is held in session storage so it survives the
+service worker being evicted. Going faster than this means editing the extension as
+well as the page — which is the point of it living in two places.
+
+The lowest-footprint way to use this is to not start a run at all and press Sync
+when you actually want to know.
 
 ## Provider terms
 

@@ -2,18 +2,24 @@
 
 const STORAGE_KEY = 'llmRunRateTracker.models';
 const PREFERENCES_STORAGE_KEY = 'llmRunRateTracker.preferences';
-const PREFERENCES_SCHEMA_VERSION = 5;
-const LEGACY_PREFERENCES_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4]);
+const PREFERENCES_SCHEMA_VERSION = 6;
+const LEGACY_PREFERENCES_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5]);
 const EXTENSION_BRIDGE_CHANNEL = 'llm-run-rate-tracker';
-// Each sync reloads the provider's page. A 30-second floor meant ~2,880 page
-// loads per tab per day, which is indistinguishable from a bot hammering the
-// site; quota figures move far too slowly for that to buy anything. The floor
-// is 5 minutes and the ceiling allows going slower still, never faster.
-// Stored intervals below the floor are clamped up on load, so existing
-// preferences migrate without a schema bump.
-const DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60;
-const MIN_AUTO_SYNC_INTERVAL_SECONDS = 5 * 60;
-const MAX_AUTO_SYNC_INTERVAL_SECONDS = 60 * 60;
+// Refreshes are a bounded run the user starts, not a background loop. A run is
+// at most REFRESH_COUNT_MAX reloads spaced at least REFRESH_INTERVAL_MIN_SECONDS
+// apart, and it stops on its own. Nothing here re-arms itself.
+//
+// These bounds are the page's half of the limit. The extension enforces its own
+// 5-minute floor per page in chrome-extension/background.js and does not trust
+// these numbers, because the page is the part an edited script could change.
+// Going faster than this is meant to require editing both.
+const REFRESH_INTERVAL_DEFAULT_SECONDS = 15 * 60;
+const REFRESH_INTERVAL_MIN_SECONDS = 5 * 60;
+const REFRESH_INTERVAL_MAX_SECONDS = 60 * 60;
+const REFRESH_INTERVAL_CHOICES = Object.freeze([300, 600, 900, 1800, 3600]);
+const REFRESH_COUNT_DEFAULT = 5;
+const REFRESH_COUNT_MIN = 1;
+const REFRESH_COUNT_MAX = 10;
 const SCAN_REQUEST_TIMEOUT_MS = 45_000;
 const CHART_COLORS = ['violet', 'cyan', 'mint', 'amber', 'rose', 'blue'];
 const PAGE_CONFIG = Object.freeze({
@@ -58,14 +64,22 @@ const expandedSettings = new Set();
 let preferences = defaultPreferences();
 let renderedPage = '';
 
+function defaultRefreshPlan() {
+	return {
+		intervalSeconds: REFRESH_INTERVAL_DEFAULT_SECONDS,
+		totalRefreshes: REFRESH_COUNT_DEFAULT,
+		remaining: 0,
+		nextAt: null
+	};
+}
+
 function defaultPreferences() {
 	return {
 		schemaVersion: PREFERENCES_SCHEMA_VERSION,
-		autoSyncEnabled: false,
-		autoSyncIntervalSeconds: DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
 		overviewPaceView: 'bars',
 		showHeadlineIndicator: true,
 		headlineScope: DEFAULT_HEADLINE_SCOPE,
+		refreshPlan: defaultRefreshPlan(),
 		providerTabs: {
 			initialized: false,
 			selectedTabs: []
@@ -78,21 +92,50 @@ function normalizeHeadlineScope(value) {
 	return HEADLINE_SCOPE_PATTERN.test(scope) ? scope : DEFAULT_HEADLINE_SCOPE;
 }
 
-function normalizeAutoSyncIntervalSeconds(value) {
+function normalizeRefreshIntervalSeconds(value) {
 	const seconds = Number(value);
-	if (!Number.isFinite(seconds)) return DEFAULT_AUTO_SYNC_INTERVAL_SECONDS;
-	return clamp(Math.round(seconds), MIN_AUTO_SYNC_INTERVAL_SECONDS, MAX_AUTO_SYNC_INTERVAL_SECONDS);
+	if (!Number.isFinite(seconds)) return REFRESH_INTERVAL_DEFAULT_SECONDS;
+	return clamp(Math.round(seconds), REFRESH_INTERVAL_MIN_SECONDS, REFRESH_INTERVAL_MAX_SECONDS);
 }
 
-function formatAutoSyncInterval(value) {
-	const seconds = normalizeAutoSyncIntervalSeconds(value);
+function normalizeRefreshCount(value) {
+	const count = Number(value);
+	if (!Number.isFinite(count)) return REFRESH_COUNT_DEFAULT;
+	return clamp(Math.round(count), REFRESH_COUNT_MIN, REFRESH_COUNT_MAX);
+}
+
+function formatRefreshInterval(value) {
+	const seconds = normalizeRefreshIntervalSeconds(value);
 	if (seconds < 60) return `${seconds}s`;
 	if (seconds % 60 === 0) return `${seconds / 60}m`;
 	return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
-function autoSyncIntervalMilliseconds(value) {
-	return normalizeAutoSyncIntervalSeconds(value) * 1000;
+function refreshIntervalMilliseconds(value) {
+	return normalizeRefreshIntervalSeconds(value) * 1000;
+}
+
+// A run is only live when it still has refreshes left AND a scheduled time. Any
+// stored shape that loses either half reads as stopped, so a corrupted or
+// hand-edited preference can never resurrect an unbounded loop.
+function sanitizeRefreshPlan(value, legacyIntervalSeconds) {
+	const intervalSeconds = normalizeRefreshIntervalSeconds(
+		value?.intervalSeconds ?? legacyIntervalSeconds
+	);
+	const totalRefreshes = normalizeRefreshCount(value?.totalRefreshes);
+	const nextAt = Number(value?.nextAt);
+	const remaining = clamp(Math.round(Number(value?.remaining) || 0), 0, totalRefreshes);
+	const scheduled = remaining > 0 && Number.isFinite(nextAt) && nextAt > 0;
+	return {
+		intervalSeconds,
+		totalRefreshes,
+		remaining: scheduled ? remaining : 0,
+		nextAt: scheduled ? nextAt : null
+	};
+}
+
+function isRefreshPlanRunning(plan = preferences.refreshPlan) {
+	return Number(plan?.remaining) > 0 && plan?.nextAt != null;
 }
 
 function stableTabUrl(value) {
@@ -153,13 +196,16 @@ function sanitizePreferences(value) {
 		seenSelections.add(identity);
 		selectedTabs.push(descriptor);
 	});
+	// autoSyncEnabled from schema <= 5 is deliberately dropped rather than
+	// translated into a running plan. That switch meant "poll forever"; silently
+	// turning it into a live run would start reloading provider pages on upgrade
+	// without anyone asking. Its interval is kept as the default for the next run.
 	return {
 		schemaVersion: PREFERENCES_SCHEMA_VERSION,
-		autoSyncEnabled: value.autoSyncEnabled === true,
-		autoSyncIntervalSeconds: normalizeAutoSyncIntervalSeconds(value.autoSyncIntervalSeconds),
 		overviewPaceView: ['graph', 'runway'].includes(value.overviewPaceView) ? value.overviewPaceView : 'bars',
 		showHeadlineIndicator: value.showHeadlineIndicator !== false,
 		headlineScope: normalizeHeadlineScope(value.headlineScope),
+		refreshPlan: sanitizeRefreshPlan(value.refreshPlan, value.autoSyncIntervalSeconds),
 		providerTabs: {
 			initialized: value.providerTabs?.initialized === true,
 			selectedTabs
@@ -453,7 +499,7 @@ function formatSyncedAgo(timestamp, now = Date.now()) {
 }
 
 function syncCountdownState(
-	enabled = preferences.autoSyncEnabled,
+	enabled = isRefreshPlanRunning(),
 	nextAt = nextAutoSyncAt,
 	syncing = scanInProgress,
 	now = Date.now()
@@ -865,18 +911,19 @@ function updateDashboardChrome(container = document.getElementById('app')) {
 }
 
 function autoSyncBadgeState(
-	enabled = preferences.autoSyncEnabled,
+	plan = preferences.refreshPlan,
 	timerActive = Boolean(autoScanTimer),
 	selectedCount = selectedTabIds.length
 ) {
-	if (!enabled) return { state: 'off', label: 'Auto-sync off' };
-	if (!timerActive || !selectedCount) return { state: 'waiting', label: 'Auto-sync waiting' };
-	return { state: 'on', label: 'Auto-sync on' };
+	if (!isRefreshPlanRunning(plan)) return { state: 'off', label: 'Refreshes off' };
+	const progress = `${plan.remaining} of ${normalizeRefreshCount(plan.totalRefreshes)} left`;
+	if (!timerActive || !selectedCount) return { state: 'waiting', label: `Refreshes paused · ${progress}` };
+	return { state: 'on', label: `Refreshing · ${progress}` };
 }
 
 function renderHeaderStatus(now = Date.now()) {
 	const autoSync = autoSyncBadgeState();
-	const countdown = syncCountdownState(preferences.autoSyncEnabled, nextAutoSyncAt, scanInProgress, now);
+	const countdown = syncCountdownState(isRefreshPlanRunning(), nextAutoSyncAt, scanInProgress, now);
 	const syncedAgo = formatSyncedAgo(lastSyncedAt, now);
 	return `
 		<span class="live-pill ${autoSync.state === 'on' ? 'is-live' : ''}" data-auto-sync-state="${autoSync.state}" title="${escapeHtml(countdown.label ? `${autoSync.label} · ${countdown.label}` : autoSync.label)}"><i></i><span class="pill-label">${escapeHtml(autoSync.label)}</span>${countdown.label ? `<em class="pill-countdown" data-sync-countdown="${countdown.state}">${escapeHtml(countdown.label)}</em>` : ''}</span>
@@ -913,7 +960,45 @@ function renderPage(page, models, enabledModels) {
 		: preferences.overviewPaceView === 'runway'
 			? renderRunwayView(enabledModels)
 			: renderComparisonChart(enabledModels);
-	return `${renderHeadlinePanel(enabledModels)}<section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
+	return `${renderHeadlinePanel(enabledModels)}${renderRefreshPlanPanel()}<section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
+}
+
+function renderRefreshPlanPanel(plan = preferences.refreshPlan, now = Date.now()) {
+	const running = isRefreshPlanRunning(plan);
+	const total = normalizeRefreshCount(plan.totalRefreshes);
+	const interval = normalizeRefreshIntervalSeconds(plan.intervalSeconds);
+	const done = total - plan.remaining;
+	const countdown = running ? formatSyncCountdown(plan.nextAt - now) : '';
+	const status = running
+		? `Refresh ${Math.min(total, done + 1)} of ${total} · next in ${countdown}`
+		: `Stopped · ${total} refresh${total === 1 ? '' : 'es'} every ${formatRefreshInterval(interval)} when started`;
+	const intervalOptions = REFRESH_INTERVAL_CHOICES
+		.map((seconds) => `<option value="${seconds}" ${seconds === interval ? 'selected' : ''}>${escapeHtml(formatRefreshInterval(seconds))}</option>`)
+		.join('');
+	const countOptions = Array.from({ length: REFRESH_COUNT_MAX }, (unused, index) => index + 1)
+		.map((count) => `<option value="${count}" ${count === total ? 'selected' : ''}>${count}</option>`)
+		.join('');
+	return `
+		<section class="panel refresh-plan-panel ${running ? 'is-running' : ''}" aria-label="Scheduled refreshes">
+			<div class="refresh-plan-headline">
+				<div>
+					<h2>Scheduled refreshes</h2>
+					<p class="refresh-plan-status" data-refresh-status>${escapeHtml(status)}</p>
+				</div>
+				<div class="control-row refresh-plan-actions">
+					${running
+						? `<button data-action="refresh-plan-reset" class="secondary compact">Restart</button><button data-action="refresh-plan-stop" class="danger-button compact">Stop</button>`
+						: `<button data-action="refresh-plan-start" ${selectedTabIds.length ? '' : 'disabled'}>Start refreshes</button>`}
+				</div>
+			</div>
+			<div class="refresh-plan-controls control-row">
+				<label class="refresh-field"><span>Every</span><select data-refresh-interval>${intervalOptions}</select></label>
+				<label class="refresh-field"><span>How many</span><select data-refresh-count>${countOptions}</select></label>
+				${running ? '<span class="refresh-plan-hint">Changing either restarts the run.</span>' : ''}
+			</div>
+			<p class="refresh-plan-note">Each refresh reloads your provider tabs and reads them. A run stops on its own after the count above — nothing repeats in the background. Press Sync in the header for a single reading now. ${selectedTabIds.length ? '' : 'Select provider tabs on Setup before starting.'}</p>
+		</section>
+	`;
 }
 
 function headlineScopeCaption(headline) {
@@ -1268,22 +1353,20 @@ function renderEmptyPanel(title, kind) {
 }
 
 function renderSourcesPanel() {
-	const autoSyncEnabled = preferences.autoSyncEnabled;
-	const autoSyncInterval = preferences.autoSyncIntervalSeconds;
-	const autoSyncIntervalLabel = formatAutoSyncInterval(autoSyncInterval);
 	const rememberedCount = preferences.providerTabs.selectedTabs.length;
+	const running = isRefreshPlanRunning();
 	return `
 		<section class="panel sources-panel" id="provider-connections">
 			<div class="section-heading sources-heading"><h2>Provider Connections</h2><div class="tracker-counts"><span>${selectedTabIds.length} connected</span><span>${rememberedCount} remembered</span></div></div>
 			<div class="sync-toolbar">
 				<div class="sync-status"><span class="sync-orb ${scanInProgress || tabDiscoveryInProgress ? 'spinning' : ''}">${icon('refresh')}</span><p>${escapeHtml(autoScanStatus)}</p></div>
 				<div class="control-row">
-					<label class="sync-interval"><span>Auto-sync interval</span><select data-auto-sync-interval aria-label="Auto-sync refresh interval">${[300, 600, 900, 1800, 3600].map((seconds) => `<option value="${seconds}" ${seconds === autoSyncInterval ? 'selected' : ''}>${escapeHtml(formatAutoSyncInterval(seconds))}</option>`).join('')}</select></label>
 					<button class="secondary" data-action="refresh-tabs" ${scanInProgress || tabDiscoveryInProgress ? 'disabled' : ''}>Refresh Tabs</button>
 					<button data-action="scan-selected" ${!selectedTabIds.length || scanInProgress || tabDiscoveryInProgress ? 'disabled' : ''}>${scanInProgress ? 'Refreshing…' : 'Scan Selected'}</button>
-					<button class="secondary" data-action="toggle-auto" ${!selectedTabIds.length && !autoSyncEnabled ? 'disabled' : ''}>${autoSyncEnabled ? 'Stop Auto-Sync' : `Auto-Sync Every ${escapeHtml(autoSyncIntervalLabel)}`}</button>
+					${running ? `<button class="danger-button" data-action="refresh-plan-stop">Stop Refreshes</button>` : ''}
 				</div>
 			</div>
+			<p class="sources-note">Scheduled refreshes are started from <a href="#/overview">Overview</a>. Each one reloads these tabs, and the extension refuses to reload the same page more than once every 5 minutes.</p>
 			${renderTabList()}
 		</section>
 	`;
@@ -1457,8 +1540,12 @@ function bindDashboardEvents(container) {
 			if (action === 'refresh-tabs') await refreshTabList();
 			if (action === 'scan-selected') await scanSelectedTabs();
 			if (action === 'connect-scan') await connectAndScan();
-			if (action === 'toggle-auto') {
-				preferences.autoSyncEnabled ? stopAutoScan() : startAutoScan();
+			if (action === 'refresh-plan-start' || action === 'refresh-plan-reset') {
+				startRefreshPlan();
+				render();
+			}
+			if (action === 'refresh-plan-stop') {
+				stopRefreshPlan();
 				render();
 			}
 			if (action === 'pace-view') {
@@ -1492,13 +1579,23 @@ function bindDashboardEvents(container) {
 		checkbox.addEventListener('change', () => toggleTabSelection(Number(checkbox.dataset.tabId)));
 	});
 
-	container.querySelectorAll('[data-auto-sync-interval]').forEach((select) => {
+	// Changing either control while a run is live re-arms it from now with the new
+	// values, rather than silently reinterpreting a run already in progress.
+	container.querySelectorAll('[data-refresh-interval], [data-refresh-count]').forEach((select) => {
 		select.addEventListener('change', () => {
-			const autoSyncEnabled = preferences.autoSyncEnabled;
-			replacePreferences({ ...preferences, autoSyncIntervalSeconds: select.value });
-			if (autoSyncEnabled) {
-				stopAutoScan({ persist: false });
-				startAutoScan({ persist: false, immediate: false });
+			const intervalSeconds = select.dataset.refreshInterval !== undefined
+				? select.value
+				: preferences.refreshPlan.intervalSeconds;
+			const totalRefreshes = select.dataset.refreshCount !== undefined
+				? select.value
+				: preferences.refreshPlan.totalRefreshes;
+			if (isRefreshPlanRunning()) {
+				startRefreshPlan({ intervalSeconds, totalRefreshes });
+			} else {
+				writeRefreshPlan({
+					intervalSeconds: normalizeRefreshIntervalSeconds(intervalSeconds),
+					totalRefreshes: normalizeRefreshCount(totalRefreshes)
+				});
 			}
 			render();
 		});
@@ -1621,7 +1718,7 @@ function toggleTabSelection(tabId) {
 	if (!update.changed) return false;
 	replacePreferences(update.preferences);
 	selectedTabIds = update.selectedTabIds;
-	if (!hasRememberedTabSelections() && preferences.autoSyncEnabled) stopAutoScan();
+	if (!hasRememberedTabSelections() && isRefreshPlanRunning()) stopRefreshPlan();
 	render();
 	return true;
 }
@@ -1661,10 +1758,10 @@ async function refreshTabList(shouldRender = true) {
 	const reconciliation = reconcileTabSelections(availableTabs, preferences);
 	preferences = savePreferences(reconciliation.preferences);
 	selectedTabIds = reconciliation.selectedTabIds;
-	if (preferences.autoSyncEnabled && !selectedTabIds.length) {
+	if (isRefreshPlanRunning() && !selectedTabIds.length) {
 		autoScanStatus = hasRememberedTabSelections()
-			? 'Auto-sync on · waiting for selected tab'
-			: 'Auto-sync on · waiting for provider tabs';
+			? 'Refreshes scheduled · waiting for selected tab'
+			: 'Refreshes scheduled · waiting for provider tabs';
 	} else {
 		autoScanStatus = availableTabs.length
 			? `${availableTabs.length} supported tab${availableTabs.length === 1 ? '' : 's'}`
@@ -1795,8 +1892,8 @@ async function pollOpenTabs() {
 	if (!found) return;
 	if (!selectedTabIds.length) {
 		autoScanStatus = hasRememberedTabSelections()
-			? 'Auto-sync on · waiting for selected tab'
-			: 'Auto-sync on · waiting for provider tabs';
+			? 'Scheduled refresh skipped · waiting for selected tab'
+			: 'Scheduled refresh skipped · waiting for provider tabs';
 		if (typeof document !== 'undefined' && currentPage() === 'setup') render();
 		else if (typeof document !== 'undefined') updateDashboardChrome();
 		return;
@@ -1804,31 +1901,66 @@ async function pollOpenTabs() {
 	await scanSelectedTabs();
 }
 
-function startAutoScan({ persist = true, immediate = true } = {}) {
-	if (persist) replacePreferences({ ...preferences, autoSyncEnabled: true });
-	if (autoScanTimer) return true;
-	const intervalSeconds = normalizeAutoSyncIntervalSeconds(preferences.autoSyncIntervalSeconds);
-	const intervalMs = autoSyncIntervalMilliseconds(intervalSeconds);
-	autoScanStatus = selectedTabIds.length
-		? `Auto-sync on · every ${formatAutoSyncInterval(intervalSeconds)}`
-		: 'Auto-sync on · waiting for selected tab';
-	nextAutoSyncAt = Date.now() + intervalMs;
-	autoScanTimer = setInterval(() => {
-		nextAutoSyncAt = Date.now() + intervalMs;
-		void pollOpenTabs();
-	}, intervalMs);
-	if (immediate) void pollOpenTabs();
-	return true;
+function writeRefreshPlan(changes) {
+	const plan = sanitizeRefreshPlan({ ...preferences.refreshPlan, ...changes });
+	replacePreferences({ ...preferences, refreshPlan: plan });
+	nextAutoSyncAt = plan.nextAt;
+	return plan;
 }
 
-function stopAutoScan({ persist = true } = {}) {
+// setTimeout, not setInterval: each refresh schedules at most one successor, and
+// only while refreshes remain. There is no repeating timer to leak or forget.
+function scheduleNextRefresh() {
 	if (autoScanTimer) {
-		clearInterval(autoScanTimer);
+		clearTimeout(autoScanTimer);
 		autoScanTimer = null;
 	}
-	nextAutoSyncAt = null;
-	if (persist) replacePreferences({ ...preferences, autoSyncEnabled: false });
-	autoScanStatus = 'Auto-sync off';
+	const plan = preferences.refreshPlan;
+	if (!isRefreshPlanRunning(plan) || typeof document === 'undefined') return;
+	autoScanTimer = setTimeout(runScheduledRefresh, Math.max(0, plan.nextAt - Date.now()));
+}
+
+async function runScheduledRefresh() {
+	autoScanTimer = null;
+	const plan = preferences.refreshPlan;
+	if (!isRefreshPlanRunning(plan)) return;
+
+	// Decremented and persisted before the scan, so a crash or a closed tab can
+	// only ever shorten the run, never extend it.
+	const remaining = Math.max(0, plan.remaining - 1);
+	writeRefreshPlan({
+		remaining,
+		nextAt: remaining > 0 ? Date.now() + refreshIntervalMilliseconds(plan.intervalSeconds) : null
+	});
+	await pollOpenTabs();
+	scheduleNextRefresh();
+	if (typeof document !== 'undefined') render();
+}
+
+function startRefreshPlan({ intervalSeconds, totalRefreshes } = {}) {
+	const interval = normalizeRefreshIntervalSeconds(
+		intervalSeconds ?? preferences.refreshPlan.intervalSeconds
+	);
+	const total = normalizeRefreshCount(totalRefreshes ?? preferences.refreshPlan.totalRefreshes);
+	writeRefreshPlan({
+		intervalSeconds: interval,
+		totalRefreshes: total,
+		remaining: total,
+		nextAt: Date.now() + interval * 1000
+	});
+	autoScanStatus = `${total} refresh${total === 1 ? '' : 'es'} scheduled · every ${formatRefreshInterval(interval)}`;
+	scheduleNextRefresh();
+	return preferences.refreshPlan;
+}
+
+function stopRefreshPlan() {
+	if (autoScanTimer) {
+		clearTimeout(autoScanTimer);
+		autoScanTimer = null;
+	}
+	writeRefreshPlan({ remaining: 0, nextAt: null });
+	autoScanStatus = 'Scheduled refreshes stopped';
+	return preferences.refreshPlan;
 }
 
 function startChromeTicker() {
@@ -1838,16 +1970,12 @@ function startChromeTicker() {
 
 async function restoreProviderSync() {
 	const found = await refreshTabList(false);
-	if (!preferences.autoSyncEnabled) return found;
-	startAutoScan({ persist: false, immediate: false });
-	if (found && selectedTabIds.length) {
-		await scanSelectedTabs();
-	} else {
-		autoScanStatus = hasRememberedTabSelections()
-			? 'Auto-sync on · waiting for selected tab'
-			: 'Auto-sync on · waiting for provider tabs';
-		if (typeof document !== 'undefined') render();
-	}
+	// A run in progress resumes with whatever count it had left. It cannot
+	// outlive that count, so resuming can never turn into an unbounded loop.
+	if (!isRefreshPlanRunning()) return found;
+	nextAutoSyncAt = preferences.refreshPlan.nextAt;
+	scheduleNextRefresh();
+	if (typeof document !== 'undefined') render();
 	return found;
 }
 
@@ -1880,10 +2008,15 @@ if (typeof module === 'object' && module.exports) {
 	module.exports = {
 		applyScrapedPayload,
 		applyScrapedPayloads,
-		autoSyncIntervalMilliseconds,
 		autoSyncBadgeState,
 		documentTitle,
-		formatAutoSyncInterval,
+		formatRefreshInterval,
+		isRefreshPlanRunning,
+		normalizeRefreshCount,
+		normalizeRefreshIntervalSeconds,
+		refreshIntervalMilliseconds,
+		renderRefreshPlanPanel,
+		sanitizeRefreshPlan,
 		formatResetDateTime,
 		formatSyncCountdown,
 		formatSyncedAgo,
