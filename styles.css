@@ -265,27 +265,6 @@ button.header-sync-button.is-syncing .ui-icon {
 	margin-bottom: 0;
 }
 
-.sync-status-panel {
-	display: grid;
-	gap: 12px;
-	align-content: start;
-	padding: 18px 22px;
-}
-
-.sync-status-head {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
-}
-
-.sync-status-head h2 {
-	margin: 0;
-	font-size: 1.05rem;
-	font-weight: 700;
-	letter-spacing: -0.018em;
-}
-
 .sync-status-pills {
 	align-content: start;
 	justify-content: flex-start;
@@ -697,8 +676,7 @@ select:focus-visible {
 }
 
 .runway-intro {
-	max-width: 62ch;
-	margin: 4px 0 0;
+	margin: 10px 0 0;
 	color: var(--muted);
 	font-size: 0.79rem;
 	line-height: 1.45;
@@ -742,7 +720,11 @@ select:focus-visible {
 }
 
 .runway-ghost-key {
-	background: repeating-linear-gradient(90deg, rgba(206, 216, 236, 0.85) 0 3px, transparent 3px 6px);
+	width: 10px;
+	height: 8px;
+	border-radius: 0;
+	clip-path: polygon(50% 0, 100% 100%, 0 100%);
+	background: rgba(206, 216, 236, 0.85);
 }
 
 .runway-grid-layout {
@@ -863,7 +845,7 @@ select:focus-visible {
 .rw-star { fill: #8ea4c4; opacity: 0.5; }
 .rw-earth { fill: #0a0e16; }
 .rw-asphalt { fill: #242b38; }
-.rw-beyond { fill: #090c12; }
+.rw-beyond { fill: #0e1219; }
 .rw-runway-end { fill: #04060a; }
 
 .rw-flow rect { fill: rgba(240, 245, 255, 0.5); }

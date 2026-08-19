@@ -698,19 +698,19 @@ test('the page title carries the headline delta only while the indicator is on',
   assert.equal(documentTitle([], on), 'Too Many Tokens');
 });
 
-test('overview opens with one row of three cards: sync, refreshes, overall', () => {
+test('overview opens with one row of cards: sync-and-refreshes, then overall', () => {
   const models = headlineFixture();
   const overview = renderPage('overview', models, models);
 
   assert.match(overview, /class="overview-top-row"/);
-  const sync = overview.indexOf('sync-status-panel');
   const refreshes = overview.indexOf('refresh-plan-panel');
   const headline = overview.indexOf('headline-panel');
-  assert.ok(sync >= 0 && refreshes >= 0 && headline >= 0, 'all three cards render');
-  assert.ok(sync < refreshes && refreshes < headline, 'cards keep their order');
-  // The sync card carries the chrome the header used to hold, same hooks.
-  assert.match(overview, /sync-status-panel[^]*data-header-status/);
-  assert.match(overview, /sync-status-panel[^]*data-action="connect-scan"/);
+  assert.ok(refreshes >= 0 && headline >= 0, 'both cards render');
+  assert.ok(refreshes < headline, 'cards keep their order');
+  // The combined card carries the chrome the header used to hold, same hooks.
+  assert.match(overview, /refresh-plan-panel[^]*data-header-status/);
+  assert.match(overview, /refresh-plan-panel[^]*data-action="connect-scan"/);
+  assert.doesNotMatch(overview, /sync-status-panel/);
 });
 
 test('the headline panel renders on Overview and hides when switched off', () => {
@@ -1152,10 +1152,10 @@ test('runway geometry moves continuously with the margin, not with the band', ()
 
   // Margin 1 lands the flag exactly on the wall: running dry at the reset.
   const onTheNumbers = sceneFor({ projectedHoursToDepletion: 100.8 });
-  assert.ok(Math.abs(onTheNumbers.flagX - 560) < 0.5, 'margin 1 is the wall itself');
+  assert.ok(Math.abs(onTheNumbers.flagX - 620) < 0.5, 'margin 1 is the wall itself');
 
   // Less margin pushes the flag past the wall, into the overrun ground.
-  assert.ok(flagFor(80) > 560);
+  assert.ok(flagFor(80) > 620);
 
   // Two margins inside the same band still differ on screen.
   assert.equal(runwayPhysics(runwayModel({ projectedHoursToDepletion: 200 })).state, 'ample');
@@ -1298,10 +1298,10 @@ test('an exhausted quota crashes into the wall and counts down to the reset', ()
   })));
   assert.equal(scene.prev, null, 'the countdown replaces the previous-projection marker');
   assert.equal(scene.ghostDx, null, 'even pace means nothing once the quota is gone');
-  assert.ok(Math.abs(scene.planeDx + 155.5 - 560) < 0.5, 'the nose touches the wall');
-  assert.ok(scene.flagX > 560, 'the reset stands in the overrun ground beyond the wall');
+  assert.ok(Math.abs(scene.planeDx + 155.5 - 620) < 0.5, 'the nose touches the wall');
+  assert.ok(scene.flagX > 620, 'the reset stands in the overrun ground beyond the wall');
   assert.equal(scene.approach.seconds, 20 * 3600, 'it closes over exactly the remaining wait');
-  assert.ok(Math.abs(scene.approach.dx - (scene.flagX - 564)) < 0.5, 'the crawl ends at the wall');
+  assert.ok(Math.abs(scene.approach.dx - (scene.flagX - 624)) < 0.5, 'the crawl ends at the wall');
 
   // Nearer the reset, it waits closer.
   const nearer = runwayScene(runwayPhysics(runwayModel({
@@ -1315,7 +1315,7 @@ test('an exhausted quota crashes into the wall and counts down to the reset', ()
   assert.match(html, /rw-reset-slider rw-reset-approach/);
   assert.match(html, /class="rw-smoke"/);
   // Crashed, not parked: the wall leans and the aircraft noses down.
-  assert.match(html, /class="rw-wall" transform="rotate\(6 560 140\)"/);
+  assert.match(html, /class="rw-wall" transform="rotate\(6 620 140\)"/);
   assert.match(html, /rw-jet rw-jet-dead" transform="rotate\(-2.5 154 140\)"/);
   assert.match(html, /data-runway-approach="72000"/);
 });

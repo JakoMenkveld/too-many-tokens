@@ -943,20 +943,7 @@ function renderPage(page, models, enabledModels) {
 		: preferences.overviewPaceView === 'runway'
 			? renderRunwayView(enabledModels)
 			: renderComparisonChart(enabledModels);
-	return `<div class="overview-top-row">${renderSyncStatusPanel()}${renderRefreshPlanPanel()}${renderHeadlinePanel(enabledModels)}</div><section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
-}
-
-function renderSyncStatusPanel() {
-	const syncLabel = scanInProgress ? 'Refreshing and scanning provider tabs' : 'Sync provider tabs';
-	return `
-		<section class="panel sync-status-panel" aria-label="Sync status">
-			<div class="sync-status-head">
-				<h2>Sync</h2>
-				<button class="header-sync-button ${scanInProgress ? 'is-syncing' : ''}" data-action="connect-scan" aria-label="${syncLabel}" title="${syncLabel}" ${scanInProgress ? 'disabled' : ''}>${icon('refresh')}</button>
-			</div>
-			<div class="header-status sync-status-pills" data-header-status>${renderHeaderStatus()}</div>
-		</section>
-	`;
+	return `<div class="overview-top-row">${renderRefreshPlanPanel()}${renderHeadlinePanel(enabledModels)}</div><section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
 }
 
 function renderRefreshPlanPanel(plan = preferences.refreshPlan, now = Date.now()) {
@@ -974,19 +961,22 @@ function renderRefreshPlanPanel(plan = preferences.refreshPlan, now = Date.now()
 	const countOptions = Array.from({ length: REFRESH_COUNT_MAX }, (unused, index) => index + 1)
 		.map((count) => `<option value="${count}" ${count === total ? 'selected' : ''}>${count}</option>`)
 		.join('');
+	const syncLabel = scanInProgress ? 'Refreshing and scanning provider tabs' : 'Sync provider tabs';
 	return `
-		<section class="panel refresh-plan-panel ${running ? 'is-running' : ''}" aria-label="Scheduled refreshes">
+		<section class="panel refresh-plan-panel ${running ? 'is-running' : ''}" aria-label="Sync and scheduled refreshes">
 			<div class="refresh-plan-headline">
 				<div>
-					<h2>Scheduled refreshes</h2>
+					<h2>Sync &amp; refreshes</h2>
 					<p class="refresh-plan-status" data-refresh-status>${escapeHtml(status)}</p>
 				</div>
 				<div class="control-row refresh-plan-actions">
+					<button class="header-sync-button ${scanInProgress ? 'is-syncing' : ''}" data-action="connect-scan" aria-label="${syncLabel}" title="${syncLabel}" ${scanInProgress ? 'disabled' : ''}>${icon('refresh')}</button>
 					${running
 						? `<button data-action="refresh-plan-reset" class="secondary compact">Restart</button><button data-action="refresh-plan-stop" class="danger-button compact">Stop</button>`
 						: `<button data-action="refresh-plan-start" ${selectedTabIds.length ? '' : 'disabled'}>Start refreshes</button>`}
 				</div>
 			</div>
+			<div class="header-status sync-status-pills" data-header-status>${renderHeaderStatus()}</div>
 			<div class="refresh-plan-controls control-row">
 				<label class="refresh-field"><span>Every</span><select data-refresh-interval>${intervalOptions}</select></label>
 				<label class="refresh-field"><span>How many</span><select data-refresh-count>${countOptions}</select></label>
@@ -1183,7 +1173,7 @@ const RUNWAY_VIEW = Object.freeze({
 	startX: 150,
 	// 100% of the quota: the wall the aircraft must not reach before reset.
 	// Fixed at the same x on every card, so cards compare by eye.
-	wallX: 560,
+	wallX: 620,
 	// Nothing is drawn off the right edge of the scene.
 	maxX: 700
 });
@@ -1514,7 +1504,7 @@ function renderRunwayView(models) {
 	const ordered = sortTrackersAlphabetically(models).slice(0, 6);
 	if (!ordered.length) return renderEmptyPacePanel('runway');
 	const view = RUNWAY_VIEW;
-	const stars = [[64, 26], [180, 52], [318, 18], [472, 44], [608, 30], [676, 68]]
+	const stars = [[64, 76], [180, 94], [318, 70], [472, 86], [608, 74], [676, 98]]
 		.map(([x, y]) => `<circle class="rw-star" cx="${x}" cy="${y}" r="1.1"></circle>`).join('');
 
 	// Ground markings loop with a 48px period; they stop short of the wall.
@@ -1615,7 +1605,7 @@ function renderRunwayView(models) {
 					<span class="runway-outcome"><i></i>${escapeHtml(physics.status)}</span>
 				</header>
 				<div class="runway-readout" aria-hidden="true"><span>Δ PACE ${escapeHtml(hud.pace)}</span><span>${escapeHtml(hud.rate)}</span><span class="runway-readout-margin">${escapeHtml(hud.margin)}</span></div>
-				<svg class="runway-scene" viewBox="0 0 ${view.width} ${view.height}" role="img" aria-label="${escapeHtml(sceneLabel)}">
+				<svg class="runway-scene" viewBox="0 56 ${view.width} ${view.height - 56}" role="img" aria-label="${escapeHtml(sceneLabel)}">
 					<rect class="rw-sky" x="0" y="0" width="${view.width}" height="140"></rect>
 					${stars}
 					<rect class="rw-earth" x="0" y="140" width="${view.width}" height="60"></rect>
@@ -1642,9 +1632,10 @@ function renderRunwayView(models) {
 	return `
 		<article class="panel chart-panel runway-panel">
 			<div class="panel-heading">
-				<div><h2>Quota Runway</h2><p class="runway-intro">You are the solid aircraft, standing at the quota you have burned; the hollow ghost is even pace — pull ahead of it and you are burning too fast. The red-and-white wall is the quota running dry; the post with the blue light is the reset. Post short of the wall: the reset reaches you first, and the gap is your spare. Post past the wall: you run dry before it.</p></div>
-				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-ghostjet-key"></i>Even-pace ghost</span><span><i class="runway-ghost-key"></i>Previous projection</span></div></div>
+				<h2>Quota Runway</h2>
+				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Severity: ample → off the end</span><span><i class="runway-ghostjet-key"></i>Even-pace ghost</span><span><i class="runway-ghost-key"></i>Previous projection</span></div></div>
 			</div>
+			<p class="runway-intro">You are the solid aircraft, standing at the quota you have burned; the hollow ghost is even pace — pull ahead of it and you are burning too fast. The red-and-white wall is the quota running dry; the post with the blue light is the reset. Post short of the wall: the reset reaches you first, and the gap is your spare. Post past the wall: you run dry before it.</p>
 			<div class="runway-grid-layout">${cards}</div>
 		</article>
 	`;
