@@ -1469,6 +1469,7 @@ function renderRunwayView(models) {
 					<div class="runway-abyss" aria-hidden="true"></div>
 					<div class="runway-strip" aria-hidden="true">
 						<div class="runway-pavement">
+							<div class="runway-rush"></div>
 							<div class="runway-centerline"></div>
 						</div>
 						${scene.ghostDepth === null ? '' : '<div class="runway-ghost-line"></div>'}

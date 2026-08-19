@@ -1269,6 +1269,9 @@ test('runway view renders the scene from the numbers rather than from a class', 
   assert.match(html, /class="runway-abyss"/);
   assert.match(html, /class="runway-end"/);
   assert.match(html, /class="runway-pavement"/);
+  // The moving ground is its own layer so it can be transformed; animating
+  // background-position updated the computed value without ever repainting.
+  assert.equal((html.match(/class="runway-rush"/g) || []).length, 2);
   assert.match(html, /class="runway-drop-face"/);
   assert.match(html, /Ample runway/);
   assert.match(html, /Off the end/);
