@@ -249,6 +249,48 @@ button.header-sync-button.is-syncing .ui-icon {
 	min-width: 0;
 }
 
+/* The row of three cards under the Overview title: sync status, the refresh
+   plan, and the overall headline. auto-fit lets the row drop to two cards
+   without an empty column when the headline is hidden, and stack on narrow
+   screens. */
+.overview-top-row {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+	gap: 16px;
+	align-items: stretch;
+	margin-bottom: 16px;
+}
+
+.overview-top-row > .panel {
+	margin-bottom: 0;
+}
+
+.sync-status-panel {
+	display: grid;
+	gap: 12px;
+	align-content: start;
+	padding: 18px 22px;
+}
+
+.sync-status-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.sync-status-head h2 {
+	margin: 0;
+	font-size: 1.05rem;
+	font-weight: 700;
+	letter-spacing: -0.018em;
+}
+
+.sync-status-pills {
+	align-content: start;
+	justify-content: flex-start;
+}
+
 .control-row {
 	display: flex;
 	flex-wrap: wrap;

@@ -921,10 +921,10 @@ function renderDashboard(models, enabledModels, page) {
 		<header class="dashboard-header">
 			<div class="mobile-brand"><span class="brand-mark">TMT</span><strong>Too Many Tokens</strong></div>
 			<h1>${escapeHtml(pageConfig.title)}</h1>
-			<div class="header-actions control-row">
+			${page === 'overview' ? '' : `<div class="header-actions control-row">
 				<div class="header-status" data-header-status>${renderHeaderStatus()}</div>
 				<button class="header-sync-button ${scanInProgress ? 'is-syncing' : ''}" data-action="connect-scan" aria-label="${syncLabel}" title="${syncLabel}" ${scanInProgress ? 'disabled' : ''}>${icon('refresh')}</button>
-			</div>
+			</div>`}
 		</header>
 
 		${renderMobileNavigation(page)}
@@ -943,7 +943,20 @@ function renderPage(page, models, enabledModels) {
 		: preferences.overviewPaceView === 'runway'
 			? renderRunwayView(enabledModels)
 			: renderComparisonChart(enabledModels);
-	return `${renderHeadlinePanel(enabledModels)}${renderRefreshPlanPanel()}<section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
+	return `<div class="overview-top-row">${renderSyncStatusPanel()}${renderRefreshPlanPanel()}${renderHeadlinePanel(enabledModels)}</div><section class="overview-pace" aria-label="Quota pace">${paceView}</section>`;
+}
+
+function renderSyncStatusPanel() {
+	const syncLabel = scanInProgress ? 'Refreshing and scanning provider tabs' : 'Sync provider tabs';
+	return `
+		<section class="panel sync-status-panel" aria-label="Sync status">
+			<div class="sync-status-head">
+				<h2>Sync</h2>
+				<button class="header-sync-button ${scanInProgress ? 'is-syncing' : ''}" data-action="connect-scan" aria-label="${syncLabel}" title="${syncLabel}" ${scanInProgress ? 'disabled' : ''}>${icon('refresh')}</button>
+			</div>
+			<div class="header-status sync-status-pills" data-header-status>${renderHeaderStatus()}</div>
+		</section>
+	`;
 }
 
 function renderRefreshPlanPanel(plan = preferences.refreshPlan, now = Date.now()) {

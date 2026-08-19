@@ -698,6 +698,21 @@ test('the page title carries the headline delta only while the indicator is on',
   assert.equal(documentTitle([], on), 'Too Many Tokens');
 });
 
+test('overview opens with one row of three cards: sync, refreshes, overall', () => {
+  const models = headlineFixture();
+  const overview = renderPage('overview', models, models);
+
+  assert.match(overview, /class="overview-top-row"/);
+  const sync = overview.indexOf('sync-status-panel');
+  const refreshes = overview.indexOf('refresh-plan-panel');
+  const headline = overview.indexOf('headline-panel');
+  assert.ok(sync >= 0 && refreshes >= 0 && headline >= 0, 'all three cards render');
+  assert.ok(sync < refreshes && refreshes < headline, 'cards keep their order');
+  // The sync card carries the chrome the header used to hold, same hooks.
+  assert.match(overview, /sync-status-panel[^]*data-header-status/);
+  assert.match(overview, /sync-status-panel[^]*data-action="connect-scan"/);
+});
+
 test('the headline panel renders on Overview and hides when switched off', () => {
   const models = headlineFixture();
   const overview = renderPage('overview', models, models);
