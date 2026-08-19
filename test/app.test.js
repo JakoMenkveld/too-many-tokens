@@ -1205,11 +1205,11 @@ test('runway view renders the scene from the numbers rather than from a class', 
   assert.equal((html.match(/class="runway-card runway-ample"/g) || []).length, 1);
   assert.equal((html.match(/class="runway-card runway-off-end"/g) || []).length, 1);
 
-  // Every card carries its geometry, so the picture is correct with no script.
-  assert.equal((html.match(/--runway-end: /g) || []).length, 2);
-  assert.equal((html.match(/--runway-severity: /g) || []).length, 2);
-  assert.equal((html.match(/--runway-speed: /g) || []).length, 2);
-  assert.equal((html.match(/data-runway-end="/g) || []).length, 2);
+  // Every card carries its own geometry, and carries it somewhere the page's
+  // Content-Security-Policy will not throw away.
+  ['end', 'drop', 'severity', 'speed', 'brake', 'ghost'].forEach((name) => {
+    assert.equal((html.match(new RegExp(`data-runway-${name}="`, 'g')) || []).length, 2, `missing data-runway-${name}`);
+  });
 
   assert.match(html, /class="aircraft-nose"/);
   assert.match(html, /class="runway-abyss"/);
@@ -1224,8 +1224,33 @@ test('runway view renders the scene from the numbers rather than from a class', 
   assert.match(html, /<dt>Reset<\/dt><dd>Thu, 13 Aug 2099 at 14:30/);
 });
 
-// The from-values only exist so a refresh can move between two states the
-// markup would each render correctly on its own.
+// serve.js sends `style-src 'self'` with no 'unsafe-inline', so a style
+// attribute in the markup is discarded by the browser and every card falls back
+// to the registered initial values -- one identical runway whatever the numbers
+// said. The scene values have to reach the element through CSSOM instead.
+test('runway scene values never travel in a style attribute', () => {
+  const html = renderRunwayView([
+    runwayModel({ id: 'x', projectedHoursToDepletion: 200 }),
+    runwayModel({ id: 'y', provider: 'OpenAI', actualCum: 1, projectedHoursToDepletion: 0 })
+  ]);
+  assert.doesNotMatch(html, /style=/);
+  assert.doesNotMatch(html, /--runway-/);
+});
+
+test('settling a card applies every scene value to the element', () => {
+  const html = renderRunwayView([runwayModel({ id: 'applied', actualCum: 1, projectedHoursToDepletion: 0 })]);
+  const card = createRunwayCardStub(html);
+  settleRunwayCards({ querySelectorAll: () => [card] });
+
+  assert.equal(card.style.values['--runway-severity'], '1');
+  assert.equal(card.style.values['--runway-drop'], '1.000');
+  assert.equal(card.style.values['--runway-end'], card.attributes['data-runway-end']);
+  ['end', 'drop', 'severity', 'speed', 'brake', 'ghost'].forEach((name) => {
+    assert.ok(card.style.values[`--runway-${name}`] !== undefined, `--runway-${name} was not applied`);
+  });
+});
+
+// The from-values only exist so a refresh can move between two readings.
 test('runway cards settle from the previous geometry on the next render', () => {
   const model = runwayModel({ id: 'settling', projectedHoursToDepletion: 200 });
   const first = renderRunwayView([model]);

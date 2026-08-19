@@ -1169,6 +1169,10 @@ const RUNWAY_HORIZON_DEPTH = 4;
 const RUNWAY_SURPLUS_SPAN = 1.5;
 const RUNWAY_DROP_SPAN = 0.5;
 const RUNWAY_MIN_GHOST_GAP_MS = 60_000;
+// Every scene value the card publishes, and the subset that is applied once
+// rather than transitioned between readings.
+const RUNWAY_SCENE_PROPERTIES = Object.freeze(['severity', 'speed', 'brake', 'ghost', 'end', 'drop']);
+const RUNWAY_STATIC_PROPERTIES = Object.freeze(['severity', 'speed', 'brake', 'ghost']);
 // Last settled scene geometry per tracker, so a re-render can transition from
 // where the scene already was instead of snapping. Keyed by tracker id.
 const runwaySettled = new Map();
@@ -1435,16 +1439,22 @@ function renderRunwayView(models) {
 			? 'no rate yet'
 			: physics.rollHours <= 0 ? 'quota dry' : `${formatDurationHours(physics.rollHours)} to dry`;
 		const sceneLabel = `${trackerDisplayLabel(model)}: ${physics.status}. ${physics.detail}${ghostNote ? ` ${ghostNote}` : ''} Pace ${hud.pace} against ideal, burn rate ${hud.rate.toLowerCase()}.`;
-		// The resting geometry is the measurement, so it is written into the
-		// style attribute and is correct with no script at all. The from-values
-		// only let settleRunwayCards() supply frames between two correct states.
+		// The scene's numbers travel as data attributes and are applied by
+		// settleRunwayCards(). They deliberately do not travel in a style
+		// attribute: the dashboard is served under `style-src 'self'` with no
+		// 'unsafe-inline' (serve.js), so the browser drops style attributes and
+		// every card would fall back to the registered initial values -- one
+		// identical runway on every tracker, whatever the numbers said.
 		const previous = runwaySettled.get(String(model.id ?? ''));
 		return `
 			<article class="runway-card runway-${physics.state}"
-				style="--runway-end: ${scene.endDepth.toFixed(2)}; --runway-drop: ${physics.drop.toFixed(3)}; --runway-severity: ${physics.severity.toFixed(3)}; --runway-speed: ${physics.speed.toFixed(3)}; --runway-brake: ${physics.brake.toFixed(3)}; --runway-ghost: ${(scene.ghostDepth ?? scene.endDepth).toFixed(2)}"
 				data-runway-id="${escapeHtml(String(model.id ?? ''))}"
 				data-runway-end="${scene.endDepth.toFixed(2)}"
-				data-runway-drop="${physics.drop.toFixed(3)}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.end.toFixed(2)},${previous.drop.toFixed(3)}"` : ''}>
+				data-runway-drop="${physics.drop.toFixed(3)}"
+				data-runway-severity="${physics.severity.toFixed(3)}"
+				data-runway-speed="${physics.speed.toFixed(3)}"
+				data-runway-brake="${physics.brake.toFixed(3)}"
+				data-runway-ghost="${(scene.ghostDepth ?? scene.endDepth).toFixed(2)}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.end.toFixed(2)},${previous.drop.toFixed(3)}"` : ''}>
 				<header class="runway-card-header">
 					<div><strong>${escapeHtml(trackerDisplayLabel(model))}</strong><span>${escapeHtml(cycleLabel(model))} · ${formatPercent(actual)} used</span></div>
 					<span class="runway-outcome"><i></i>${escapeHtml(physics.status)}</span>
@@ -1501,27 +1511,34 @@ function renderRunwayView(models) {
 	`;
 }
 
-// Moves each scene from where it last settled to where the new numbers put it.
-// Both ends are values the markup renders statically on its own; this only
-// supplies the frames in between, so a refresh reads as the runway shortening
-// rather than as a scene rebuilding itself.
+// Applies each scene's numbers, and moves the two that carry distance from
+// where the scene last settled to where the new reading puts them. Writing
+// through CSSOM rather than a style attribute is what keeps this working under
+// the page's own Content-Security-Policy -- see renderRunwayView().
 function settleRunwayCards(root) {
 	if (!root || typeof root.querySelectorAll !== 'function') return;
 	root.querySelectorAll('.runway-card[data-runway-end]').forEach((card) => {
-		const end = Number(card.getAttribute('data-runway-end'));
-		const drop = Number(card.getAttribute('data-runway-drop'));
-		if (!Number.isFinite(end) || !Number.isFinite(drop)) return;
-		runwaySettled.set(card.getAttribute('data-runway-id') || '', { end, drop });
+		const scene = {};
+		for (const name of RUNWAY_SCENE_PROPERTIES) {
+			const value = Number(card.getAttribute(`data-runway-${name}`));
+			if (!Number.isFinite(value)) return;
+			scene[name] = value;
+		}
+		RUNWAY_STATIC_PROPERTIES.forEach((name) => card.style.setProperty(`--runway-${name}`, String(scene[name])));
+		runwaySettled.set(card.getAttribute('data-runway-id') || '', { end: scene.end, drop: scene.drop });
+
 		const from = (card.getAttribute('data-runway-from') || '').split(',').map(Number);
-		if (from.length !== 2 || !from.every(Number.isFinite)) return;
-		if (Math.abs(from[0] - end) < 0.01 && Math.abs(from[1] - drop) < 0.001) return;
-		if (typeof requestAnimationFrame !== 'function') return;
-		card.style.setProperty('--runway-end', from[0].toFixed(2));
-		card.style.setProperty('--runway-drop', from[1].toFixed(3));
+		const moving = from.length === 2
+			&& from.every(Number.isFinite)
+			&& (Math.abs(from[0] - scene.end) >= 0.01 || Math.abs(from[1] - scene.drop) >= 0.001)
+			&& typeof requestAnimationFrame === 'function';
+		card.style.setProperty('--runway-end', (moving ? from[0] : scene.end).toFixed(2));
+		card.style.setProperty('--runway-drop', (moving ? from[1] : scene.drop).toFixed(3));
+		if (!moving) return;
 		void card.offsetWidth;
 		requestAnimationFrame(() => {
-			card.style.setProperty('--runway-end', end.toFixed(2));
-			card.style.setProperty('--runway-drop', drop.toFixed(3));
+			card.style.setProperty('--runway-end', scene.end.toFixed(2));
+			card.style.setProperty('--runway-drop', scene.drop.toFixed(3));
 		});
 	});
 }
