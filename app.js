@@ -1628,7 +1628,7 @@ function renderRunwayView(models) {
 	return `
 		<article class="panel chart-panel runway-panel">
 			<div class="panel-heading">
-				<div><h2>Quota Runway</h2><p class="runway-intro">You are the solid aircraft; the hollow one is even pace. The runway ends where the quota runs dry, and the checkered post is where the reset catches you — past the end of the runway means running dry first.</p></div>
+				<div><h2>Quota Runway</h2><p class="runway-intro">You are the solid aircraft, standing at the quota you have burned; the hollow ghost is even pace — pull ahead of it and you are burning too fast. The runway ends where the quota runs dry. The checkered post is where the reset catches you: short of the end, quota to spare; past it, dry before the reset.</p></div>
 				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-ghostjet-key"></i>Even-pace ghost</span><span><i class="runway-ghost-key"></i>Previous projection</span></div></div>
 			</div>
 			<div class="runway-grid-layout">${cards}</div>
