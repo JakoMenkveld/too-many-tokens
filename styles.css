@@ -640,14 +640,28 @@ select:focus-visible {
 	stroke-width: 2;
 }
 
+/* The runway scene is driven entirely by six numbers app.js writes onto the
+   card. They are registered so they interpolate: a refresh moves the gate and
+   the aircraft between two correct resting states instead of replaying a
+   cinematic. Nothing here is a one-shot animation -- the only keyframes that
+   exist loop, so a re-render cannot restart a story the reader was watching. */
+@property --runway-end { syntax: '<number>'; inherits: true; initial-value: 40; }
+@property --runway-drop { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --runway-severity { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --runway-speed { syntax: '<number>'; inherits: true; initial-value: 1; }
+@property --runway-brake { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --runway-ghost { syntax: '<number>'; inherits: true; initial-value: 40; }
+
 .runway-panel .panel-heading > div:first-child {
 	min-width: 0;
 }
 
 .runway-intro {
+	max-width: 62ch;
 	margin: 4px 0 0;
 	color: var(--muted);
 	font-size: 0.79rem;
+	line-height: 1.45;
 }
 
 .runway-legend {
@@ -673,8 +687,15 @@ select:focus-visible {
 	border-radius: 999px;
 }
 
-.runway-safe-key { background: var(--mint); }
-.runway-overrun-key { background: var(--rose); }
+/* The legend is a scale, not a pair of outcomes, because the scene is. */
+.runway-legend-scale i {
+	width: 54px;
+	background: linear-gradient(90deg, hsl(158 72% 66%), hsl(82 72% 62%), hsl(6 72% 66%));
+}
+
+.runway-ghost-key {
+	background: repeating-linear-gradient(90deg, rgba(206, 216, 236, 0.85) 0 3px, transparent 3px 6px);
+}
 
 .runway-grid-layout {
 	display: grid;
@@ -684,11 +705,27 @@ select:focus-visible {
 }
 
 .runway-card {
+	/* One scalar drives the colour, so a marginal card is visibly between a
+	   comfortable one and an overrun one rather than snapping to the far end. */
+	--runway-hue: calc(158 - var(--runway-severity) * 152);
+	--runway-tint: hsl(var(--runway-hue) 72% 66%);
+	--runway-tint-deep: hsl(var(--runway-hue) 64% 48%);
+	--runway-strip-height: 218px;
+	--runway-strip-top: 100px;
 	min-width: 0;
 	overflow: hidden;
 	border: 1px solid var(--border-soft);
 	border-radius: 14px;
 	background: rgba(8, 11, 19, 0.34);
+	transition:
+		--runway-end 900ms cubic-bezier(0.22, 0.68, 0.24, 1),
+		--runway-drop 900ms cubic-bezier(0.3, 0.1, 0.2, 1);
+}
+
+/* No measurable rate is not a safe landing, so it gets no verdict colour. */
+.runway-holding {
+	--runway-tint: #8b98ae;
+	--runway-tint-deep: #5a6479;
 }
 
 .runway-card-header {
@@ -708,41 +745,40 @@ select:focus-visible {
 
 .runway-card-header strong {
 	overflow: hidden;
-	color: #e3e7f0;
-	font-size: 0.92rem;
+	color: #dce1eb;
+	font-size: 0.93rem;
+	font-weight: 680;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
 .runway-card-header > div > span {
-	color: #6f7b91;
-	font-size: 0.72rem;
+	color: #69758a;
+	font-size: 0.73rem;
 }
 
 .runway-outcome {
 	display: inline-flex;
-	flex: 0 0 auto;
+	flex-shrink: 0;
 	align-items: center;
-	gap: 6px;
-	padding: 5px 8px;
-	border: 1px solid var(--border-soft);
+	gap: 7px;
+	padding: 4px 9px;
+	border: 1px solid color-mix(in srgb, var(--runway-tint) 32%, transparent);
 	border-radius: 999px;
+	background: color-mix(in srgb, var(--runway-tint) 12%, transparent);
+	color: var(--runway-tint);
 	font-size: 0.72rem;
-	font-weight: 720;
+	font-weight: 700;
 	white-space: nowrap;
 }
 
 .runway-outcome i {
-	width: 6px;
-	height: 6px;
+	display: block;
+	width: 7px;
+	height: 7px;
 	border-radius: 50%;
-	box-shadow: 0 0 9px currentColor;
+	background: var(--runway-tint);
 }
-
-.runway-safe .runway-outcome { color: #72dfbd; }
-.runway-safe .runway-outcome i { background: #72dfbd; }
-.runway-overrun .runway-outcome { color: #f58aa2; }
-.runway-overrun .runway-outcome i { background: #f0718c; }
 
 .runway-stage {
 	position: relative;
@@ -753,10 +789,10 @@ select:focus-visible {
 	background:
 		radial-gradient(circle at 50% 26%, rgba(125, 219, 244, 0.18), transparent 22%),
 		linear-gradient(180deg, #111a2d 0%, #17243a 31%, #59484c 43%, #171b23 44%, #0c1019 100%);
-}
-
-.runway-overrun .runway-stage {
-	animation: runway-impact-shake 6.2s linear forwards;
+	/* Amplitude is the product of severity and approach speed, so it fades to
+	   nothing on its own for a healthy tracker. No threshold to tune. */
+	--runway-rumble: calc(var(--runway-severity) * var(--runway-speed) * 1.1);
+	animation: runway-rumble calc(0.42s / var(--runway-speed)) steps(4, end) infinite;
 }
 
 .runway-sky {
@@ -781,10 +817,10 @@ select:focus-visible {
 
 .runway-horizon {
 	position: absolute;
-	top: 119px;
+	top: 76px;
 	left: -5%;
 	width: 110%;
-	height: 43px;
+	height: 34px;
 	z-index: -1;
 	background:
 		linear-gradient(150deg, transparent 0 12%, #101620 12% 18%, transparent 18% 23%, #121923 23% 33%, transparent 33% 42%, #0e141d 42% 52%, transparent 52% 62%, #121923 62% 75%, transparent 75%),
@@ -792,9 +828,11 @@ select:focus-visible {
 	opacity: 0.88;
 }
 
+/* Everything beyond the gate. The abyss is always drawn; how much of it you
+   see is the measurement. */
 .runway-abyss {
 	position: absolute;
-	top: 145px;
+	top: 100px;
 	right: 0;
 	bottom: 0;
 	left: 0;
@@ -807,25 +845,23 @@ select:focus-visible {
 
 .runway-strip {
 	position: absolute;
-	top: 42px;
-	left: 50%;
-	width: min(92%, 500px);
-	height: 390px;
+	top: var(--runway-strip-top);
+	left: 0;
+	width: 100%;
+	height: var(--runway-strip-height);
 	z-index: 1;
-	overflow: hidden;
-	clip-path: polygon(44.5% 0, 55.5% 0, 100% 100%, 0 100%);
-	transform: translateX(-50%);
+	/* The ground plane. Everything inside is positioned in percentages of this
+	   box, so a depth of 0 is the horizon and 100 is under the camera. */
+	clip-path: polygon(47.6% 0, 52.4% 0, 95% 100%, 5% 100%);
 }
 
 .runway-pavement {
 	position: absolute;
-	top: 12px;
+	top: calc(var(--runway-end) * 1%);
 	right: 0;
+	bottom: 0;
 	left: 0;
-	height: 500px;
-	background:
-		linear-gradient(90deg, transparent 0 3%, rgba(240, 245, 255, 0.82) 3% 3.8%, transparent 3.8% 96.2%, rgba(240, 245, 255, 0.82) 96.2% 97%, transparent 97%),
-		linear-gradient(90deg, #2b313d, #3d4452 48%, #292f3a);
+	background: linear-gradient(90deg, #2b313d, #3d4452 48%, #292f3a);
 	box-shadow: 0 -5px 18px rgba(0, 0, 0, 0.82);
 }
 
@@ -833,57 +869,58 @@ select:focus-visible {
 	position: absolute;
 	inset: 0;
 	content: '';
-	background: repeating-linear-gradient(174deg, transparent 0 19px, rgba(255, 255, 255, 0.018) 20px 21px);
+	background: repeating-linear-gradient(174deg, transparent 0 19px, rgba(255, 255, 255, 0.02) 20px 21px);
 	mix-blend-mode: screen;
 }
 
+/* The one honest use of motion: the ground still moving past a rolling
+   aircraft. Its rate is the burn rate, so a tracker running well above ideal
+   pace looks fast even while it is still projected to stop in time. */
 .runway-centerline {
 	position: absolute;
-	inset: 0;
-	z-index: 2;
-	animation: runway-marking-rush 5.6s cubic-bezier(0.2, 0.72, 0.18, 1) forwards;
-}
-
-.runway-centerline i {
-	position: absolute;
+	top: 0;
 	left: 50%;
-	width: 4px;
-	height: 18px;
-	border-radius: 1px;
-	background: rgba(243, 245, 249, 0.88);
+	width: 3.2%;
+	height: 100%;
+	z-index: 2;
+	background: repeating-linear-gradient(180deg, rgba(243, 245, 249, 0.9) 0 9%, transparent 9% 22%);
+	-webkit-mask-image: linear-gradient(180deg, transparent, #000 30%);
+	mask-image: linear-gradient(180deg, transparent, #000 30%);
 	transform: translateX(-50%);
+	animation: runway-marking-flow calc(2.9s / var(--runway-speed)) linear infinite;
 }
 
-.runway-centerline i:nth-child(1) { top: 3%; width: 2px; height: 9px; }
-.runway-centerline i:nth-child(2) { top: 11%; width: 3px; height: 12px; }
-.runway-centerline i:nth-child(3) { top: 21%; height: 15px; }
-.runway-centerline i:nth-child(4) { top: 33%; width: 5px; height: 20px; }
-.runway-centerline i:nth-child(5) { top: 47%; width: 7px; height: 26px; }
-.runway-centerline i:nth-child(6) { top: 62%; width: 9px; height: 34px; }
-.runway-centerline i:nth-child(7) { top: 79%; width: 12px; height: 44px; }
-.runway-centerline i:nth-child(8) { top: 98%; width: 15px; height: 54px; }
+/* Where the gate sat at the previous reading. Recomputed from history, so it
+   is the same measurement one refresh ago rather than a remembered pixel. */
+.runway-ghost-line {
+	position: absolute;
+	top: calc(var(--runway-ghost) * 1%);
+	right: 0;
+	left: 0;
+	height: 2px;
+	z-index: 3;
+	background: repeating-linear-gradient(90deg, rgba(206, 216, 236, 0.62) 0 6px, transparent 6px 12px);
+	opacity: 0.7;
+}
 
 .runway-end {
 	position: absolute;
-	top: 2%;
-	left: 50%;
-	width: 100%;
-	height: 12px;
-	z-index: 3;
-	transform: translateX(-50%);
-	transform-origin: 50% 50%;
+	top: calc(var(--runway-end) * 1%);
+	right: 0;
+	left: 0;
+	height: 9px;
+	z-index: 4;
 }
 
 .runway-drop-face {
 	position: absolute;
 	right: 0;
-	top: -18px;
+	top: -13px;
 	left: 0;
-	height: 18px;
-	background:
-		repeating-linear-gradient(100deg, rgba(240, 113, 140, 0.45) 0 8px, rgba(20, 23, 31, 0.6) 8px 16px),
-		linear-gradient(180deg, #252b35, #050609);
-	box-shadow: 0 -2px 10px rgba(239, 113, 140, 0.38), 0 8px 16px rgba(0, 0, 0, 0.88);
+	height: 13px;
+	border-top: 1px solid color-mix(in srgb, var(--runway-tint) 62%, transparent);
+	background: linear-gradient(180deg, #1d222b, #05070a);
+	box-shadow: 0 -3px 12px color-mix(in srgb, var(--runway-tint) 32%, transparent), 0 8px 16px rgba(0, 0, 0, 0.88);
 }
 
 .runway-threshold {
@@ -892,22 +929,71 @@ select:focus-visible {
 	left: 50%;
 	display: grid;
 	grid-template-columns: repeat(5, 1fr);
-	gap: 4px;
-	width: 25%;
-	height: 12px;
+	gap: 3px;
+	width: calc(13% + var(--runway-end) * 0.42%);
+	height: 8px;
 	transform: translateX(-50%);
 }
 
 .runway-threshold span {
-	background: linear-gradient(90deg, #f0f2f6 0 50%, #e06a7d 50%);
+	background: linear-gradient(90deg, #f0f2f6 0 50%, var(--runway-tint-deep) 50%);
 }
 
-.runway-safe .runway-end {
-	animation: runway-end-safe 5.6s cubic-bezier(0.2, 0.72, 0.18, 1) forwards;
+/* Label sits at the gate's own depth. The strip is clipped to the ground plane,
+   so the label lives in the stage and tracks the same number. */
+.runway-gate-label {
+	position: absolute;
+	/* Clamped so an overrun keeps its label on the card. */
+	top: calc(var(--runway-strip-top) + (min(var(--runway-end), 84) / 100) * var(--runway-strip-height));
+	right: 12px;
+	z-index: 6;
+	display: flex;
+	justify-content: flex-end;
+	transform: translateY(-165%);
+	pointer-events: none;
 }
 
-.runway-overrun .runway-end {
-	animation: runway-end-overrun 5.6s cubic-bezier(0.22, 0.7, 0.15, 1) forwards;
+.runway-gate-label span {
+	padding: 2px 8px;
+	border: 1px solid color-mix(in srgb, var(--runway-tint) 34%, transparent);
+	border-radius: 999px;
+	background: rgba(6, 9, 15, 0.78);
+	color: var(--runway-tint);
+	font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+	font-size: 0.66rem;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+	white-space: nowrap;
+}
+
+/* Thrust reversers: visible exactly as far as the burn rate is falling. */
+.runway-brake-glow {
+	position: absolute;
+	bottom: 34px;
+	left: 50%;
+	width: 168px;
+	height: 46px;
+	z-index: 4;
+	border-radius: 50%;
+	opacity: calc(max(var(--runway-brake), 0) * 0.95);
+	background: radial-gradient(ellipse, rgba(122, 226, 190, 0.42), transparent 68%);
+	filter: blur(7px);
+	transform: translateX(-50%);
+}
+
+/* And its opposite: a rate that is still building shows as a hot approach. */
+.runway-heat {
+	position: absolute;
+	bottom: 18px;
+	left: 50%;
+	width: 210px;
+	height: 74px;
+	z-index: 3;
+	border-radius: 50%;
+	opacity: calc(max(var(--runway-speed) - 1, 0) * 0.75 + max(0 - var(--runway-brake), 0) * 0.35);
+	background: radial-gradient(ellipse, rgba(246, 170, 107, 0.4), transparent 70%);
+	filter: blur(10px);
+	transform: translateX(-50%);
 }
 
 .aircraft-rig {
@@ -917,17 +1003,14 @@ select:focus-visible {
 	width: 228px;
 	height: 194px;
 	z-index: 5;
-	transform: translateX(-50%);
-	transform-origin: 50% 70%;
+	transform-origin: 50% 88%;
 	filter: drop-shadow(0 17px 10px rgba(0, 0, 0, 0.55));
-}
-
-.runway-safe .aircraft-rig {
-	animation: aircraft-safe-stop 5.6s cubic-bezier(0.16, 0.8, 0.22, 1) forwards;
-}
-
-.runway-overrun .aircraft-rig {
-	animation: aircraft-overrun-drop 6.2s cubic-bezier(0.22, 0.7, 0.2, 1) forwards;
+	/* Going over the lip is a continuum, not an event. */
+	transform:
+		translateX(-50%)
+		translateY(calc(var(--runway-drop) * 58px))
+		rotate(calc(var(--runway-drop) * 13deg))
+		scale(calc(0.76 - var(--runway-drop) * 0.16));
 }
 
 .aircraft-main,
@@ -947,6 +1030,7 @@ select:focus-visible {
 	width: 138px;
 	height: 30px;
 	border-radius: 50%;
+	opacity: calc(1 - var(--runway-drop));
 	background: rgba(0, 0, 0, 0.42);
 	filter: blur(8px);
 	transform: translateX(-50%);
@@ -1040,10 +1124,46 @@ select:focus-visible {
 	transform-origin: 50% 100%;
 }
 
+/* The break-up is a pose, not a sequence: every offset scales with the same
+   drop the aircraft is falling by, so a mild overrun tilts and a total loss
+   sheds the airframe, with everything in between actually drawn. */
+.aircraft-wing-left {
+	opacity: calc(1 - var(--runway-drop) * 0.5);
+	transform: translate(calc(var(--runway-drop) * -58px), calc(var(--runway-drop) * 44px)) rotate(calc(var(--runway-drop) * -46deg));
+}
+
+.aircraft-wing-right {
+	opacity: calc(1 - var(--runway-drop) * 0.54);
+	transform: translate(calc(var(--runway-drop) * 64px), calc(var(--runway-drop) * 34px)) rotate(calc(var(--runway-drop) * 52deg));
+}
+
+.aircraft-tailplane-left {
+	opacity: calc(1 - var(--runway-drop) * 0.6);
+	transform: translate(calc(var(--runway-drop) * -38px), calc(var(--runway-drop) * 22px)) rotate(calc(var(--runway-drop) * -58deg));
+}
+
+.aircraft-tailplane-right {
+	opacity: calc(1 - var(--runway-drop) * 0.6);
+	transform: translate(calc(var(--runway-drop) * 41px), calc(var(--runway-drop) * 28px)) rotate(calc(var(--runway-drop) * 62deg));
+}
+
+.aircraft-fin {
+	opacity: calc(1 - var(--runway-drop) * 0.62);
+	transform: translate(calc(var(--runway-drop) * 26px), calc(var(--runway-drop) * 26px)) rotate(calc(var(--runway-drop) * 78deg));
+}
+
+.aircraft-nose {
+	opacity: calc(1 - var(--runway-drop) * 0.55);
+	transform: translate(calc(-50% + var(--runway-drop) * -14px), calc(var(--runway-drop) * 42px)) rotate(calc(var(--runway-drop) * -26deg));
+}
+
 .aircraft-fragments {
 	position: absolute;
 	inset: 0;
 	z-index: 8;
+	/* Debris only once the airframe is genuinely gone, so the most dramatic
+	   thing on the card stays rare and earned. */
+	opacity: calc(max(var(--runway-drop) - 0.55, 0) * 2.2);
 	pointer-events: none;
 }
 
@@ -1053,50 +1173,27 @@ select:focus-visible {
 	left: 50%;
 	width: 11px;
 	height: 7px;
-	opacity: 0;
 	background: #bcc3cf;
-	box-shadow: 0 0 6px rgba(240, 113, 140, 0.55);
+	box-shadow: 0 0 6px color-mix(in srgb, var(--runway-tint) 55%, transparent);
+	animation: runway-ember 3.4s ease-in-out infinite;
 }
 
-.runway-overrun .aircraft-wing-left { animation: aircraft-wing-break-left 6.2s ease-in forwards; }
-.runway-overrun .aircraft-wing-right { animation: aircraft-wing-break-right 6.2s ease-in forwards; }
-.runway-overrun .aircraft-tailplane-left { animation: aircraft-tail-break-left 6.2s ease-in forwards; }
-.runway-overrun .aircraft-tailplane-right { animation: aircraft-tail-break-right 6.2s ease-in forwards; }
-.runway-overrun .aircraft-fin { animation: aircraft-fin-break 6.2s ease-in forwards; }
-.runway-overrun .aircraft-nose { animation: aircraft-nose-break 6.2s ease-in forwards; }
-.runway-overrun .aircraft-fragments i:nth-child(1) { animation: aircraft-fragment-one 6.2s ease-out forwards; }
-.runway-overrun .aircraft-fragments i:nth-child(2) { animation: aircraft-fragment-two 6.2s ease-out forwards; }
-.runway-overrun .aircraft-fragments i:nth-child(3) { animation: aircraft-fragment-three 6.2s ease-out forwards; }
-.runway-overrun .aircraft-fragments i:nth-child(4) { animation: aircraft-fragment-four 6.2s ease-out forwards; }
-.runway-overrun .aircraft-fragments i:nth-child(5) { animation: aircraft-fragment-five 6.2s ease-out forwards; }
-.runway-overrun .aircraft-fragments i:nth-child(6) { animation: aircraft-fragment-six 6.2s ease-out forwards; }
+.aircraft-fragments i:nth-child(1) { transform: translate(calc(var(--runway-drop) * -84px), calc(var(--runway-drop) * 46px)) rotate(150deg); animation-delay: -0.2s; }
+.aircraft-fragments i:nth-child(2) { transform: translate(calc(var(--runway-drop) * 92px), calc(var(--runway-drop) * 32px)) rotate(-130deg); animation-delay: -0.7s; }
+.aircraft-fragments i:nth-child(3) { transform: translate(calc(var(--runway-drop) * -55px), calc(var(--runway-drop) * 74px)) rotate(200deg); animation-delay: -1.3s; }
+.aircraft-fragments i:nth-child(4) { transform: translate(calc(var(--runway-drop) * 62px), calc(var(--runway-drop) * 66px)) rotate(-215deg); animation-delay: -1.9s; }
+.aircraft-fragments i:nth-child(5) { transform: translate(calc(var(--runway-drop) * -26px), calc(var(--runway-drop) * 88px)) rotate(275deg); animation-delay: -2.4s; }
+.aircraft-fragments i:nth-child(6) { transform: translate(calc(var(--runway-drop) * 34px), calc(var(--runway-drop) * 92px)) rotate(-290deg); animation-delay: -2.9s; }
 
-.runway-brake-glow {
-	position: absolute;
-	bottom: 38px;
-	left: 50%;
-	width: 150px;
-	height: 46px;
-	z-index: 4;
-	border-radius: 50%;
-	opacity: 0;
-	background: radial-gradient(ellipse, rgba(246, 198, 107, 0.35), transparent 68%);
-	filter: blur(7px);
-	transform: translateX(-50%);
-}
-
-.runway-safe .runway-brake-glow {
-	animation: runway-brake-glow 5.6s ease-out forwards;
-}
-
+/* Behind the airframe, so a total loss is still recognisably an aircraft. */
 .runway-impact {
 	position: absolute;
-	bottom: -8px;
+	bottom: 2px;
 	left: 50%;
-	width: 180px;
-	height: 82px;
-	z-index: 7;
-	opacity: 0;
+	width: 150px;
+	height: 62px;
+	z-index: 4;
+	opacity: calc(max(var(--runway-drop) - 0.45, 0) * 1.05);
 	transform: translateX(-50%);
 }
 
@@ -1105,16 +1202,18 @@ select:focus-visible {
 	bottom: 0;
 	left: 50%;
 	border-radius: 50%;
-	background: radial-gradient(circle, rgba(255, 222, 151, 0.9), rgba(240, 113, 140, 0.45) 38%, transparent 72%);
+	background: radial-gradient(circle, rgba(255, 222, 151, 0.9), color-mix(in srgb, var(--runway-tint) 45%, transparent) 38%, transparent 72%);
 	filter: blur(2px);
 	transform: translateX(-50%);
+	animation: runway-ember 2.6s ease-in-out infinite;
 }
 
 .runway-impact i:nth-child(1) { width: 72px; height: 72px; }
-.runway-impact i:nth-child(2) { width: 128px; height: 44px; }
-.runway-impact i:nth-child(3) { width: 176px; height: 25px; }
-.runway-overrun .runway-impact { animation: runway-impact-flash 6.2s ease-out forwards; }
+.runway-impact i:nth-child(2) { width: 128px; height: 44px; animation-delay: -0.9s; }
+.runway-impact i:nth-child(3) { width: 176px; height: 25px; animation-delay: -1.7s; }
 
+/* Three readouts, all real numbers: how far off ideal pace the burn is, which
+   way the rate itself is moving, and the margin at the reset. */
 .runway-hud {
 	position: absolute;
 	top: 10px;
@@ -1123,15 +1222,23 @@ select:focus-visible {
 	display: flex;
 	z-index: 9;
 	justify-content: space-between;
+	gap: 8px;
 	color: rgba(183, 224, 235, 0.62);
 	font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-	font-size: 0.72rem;
+	font-size: 0.68rem;
 	font-weight: 720;
-	letter-spacing: 0.12em;
+	letter-spacing: 0.09em;
 }
 
-.runway-overrun .runway-hud span:last-child { color: #f58aa2; }
-.runway-safe .runway-hud span:last-child { color: #72dfbd; }
+.runway-hud span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.runway-hud-margin {
+	color: var(--runway-tint);
+}
 
 .runway-card-footer {
 	display: grid;
@@ -1146,6 +1253,12 @@ select:focus-visible {
 	color: #8793a9;
 	font-size: 0.77rem;
 	line-height: 1.45;
+}
+
+.runway-card-footer p em {
+	color: #cbd4e6;
+	font-style: normal;
+	font-weight: 650;
 }
 
 .runway-card-footer dl {
@@ -1178,97 +1291,22 @@ select:focus-visible {
 	font-weight: 650;
 }
 
-@keyframes runway-marking-rush {
-	0% { transform: translateY(-65px) scale(0.82); }
-	72% { transform: translateY(38px) scale(1.05); }
-	100% { transform: translateY(64px) scale(1.12); }
+@keyframes runway-marking-flow {
+	from { background-position-y: 0; }
+	to { background-position-y: 22%; }
 }
 
-@keyframes runway-end-safe {
-	0% { top: 2%; transform: translateX(-50%) scale(0.35); }
-	72% { top: 17%; transform: translateX(-50%) scale(0.74); }
-	88% { top: 20%; transform: translateX(-50%) scale(0.81); }
-	100% { top: 18%; transform: translateX(-50%) scale(0.78); }
+@keyframes runway-rumble {
+	0%, 100% { transform: translate(0, 0); }
+	25% { transform: translate(calc(var(--runway-rumble) * -1px), calc(var(--runway-rumble) * 0.4px)); }
+	50% { transform: translate(calc(var(--runway-rumble) * 1px), calc(var(--runway-rumble) * -0.3px)); }
+	75% { transform: translate(calc(var(--runway-rumble) * -0.6px), calc(var(--runway-rumble) * 0.7px)); }
 }
 
-@keyframes runway-end-overrun {
-	0% { top: 2%; transform: translateX(-50%) scale(0.35); }
-	68% { top: 50%; transform: translateX(-50%) scale(1.2); }
-	82% { top: 90%; transform: translateX(-50%) scale(1.8); }
-	100% { top: 116%; transform: translateX(-50%) scale(2.2); }
+@keyframes runway-ember {
+	0%, 100% { opacity: 0.45; }
+	50% { opacity: 1; }
 }
-
-@keyframes aircraft-safe-stop {
-	0% { transform: translateX(-50%) translateY(14px) scale(1.03); }
-	55% { transform: translateX(-50%) translateY(4px) scale(1); }
-	76% { transform: translateX(-50%) translateY(1px) rotateZ(-0.6deg); }
-	86% { transform: translateX(-50%) translateY(7px) rotateZ(0.4deg) scaleY(0.985); }
-	100% { transform: translateX(-50%) translateY(5px) rotateZ(0) scaleY(0.99); }
-}
-
-@keyframes aircraft-overrun-drop {
-	0%, 68% { transform: translateX(-50%) translateY(8px) rotateZ(0) scale(1); }
-	76% { transform: translateX(-50%) translateY(22px) rotateZ(1.5deg) scale(0.99); }
-	86% { transform: translateX(-50%) translateY(70px) rotateZ(-5deg) scale(0.92); }
-	100% { transform: translateX(-50%) translateY(172px) rotateZ(13deg) scale(0.72); filter: blur(1px) drop-shadow(0 10px 8px rgba(0, 0, 0, 0.6)); }
-}
-
-@keyframes runway-brake-glow {
-	0%, 45% { opacity: 0; transform: translateX(-50%) scale(0.7); }
-	68% { opacity: 0.85; transform: translateX(-50%) scale(1.15); }
-	100% { opacity: 0.18; transform: translateX(-50%) scale(0.9); }
-}
-
-@keyframes runway-impact-flash {
-	0%, 76% { opacity: 0; transform: translateX(-50%) scale(0.25); }
-	82% { opacity: 1; transform: translateX(-50%) scale(1.15); }
-	100% { opacity: 0.08; transform: translateX(-50%) scale(1.75); }
-}
-
-@keyframes runway-impact-shake {
-	0%, 76%, 100% { transform: translate(0); }
-	79% { transform: translate(-2px, 1px); }
-	82% { transform: translate(3px, -1px); }
-	85% { transform: translate(-2px, 2px); }
-	88% { transform: translate(1px, 0); }
-}
-
-@keyframes aircraft-wing-break-left {
-	0%, 76% { transform: translate(0) rotate(0); opacity: 1; }
-	100% { transform: translate(-82px, 64px) rotate(-58deg); opacity: 0.25; }
-}
-
-@keyframes aircraft-wing-break-right {
-	0%, 76% { transform: translate(0) rotate(0); opacity: 1; }
-	100% { transform: translate(91px, 48px) rotate(69deg); opacity: 0.2; }
-}
-
-@keyframes aircraft-tail-break-left {
-	0%, 78% { transform: translate(0) rotate(0); opacity: 1; }
-	100% { transform: translate(-53px, 30px) rotate(-75deg); opacity: 0.15; }
-}
-
-@keyframes aircraft-tail-break-right {
-	0%, 78% { transform: translate(0) rotate(0); opacity: 1; }
-	100% { transform: translate(57px, 39px) rotate(82deg); opacity: 0.15; }
-}
-
-@keyframes aircraft-fin-break {
-	0%, 78% { transform: translate(0) rotate(0); opacity: 1; }
-	100% { transform: translate(36px, 36px) rotate(105deg); opacity: 0.12; }
-}
-
-@keyframes aircraft-nose-break {
-	0%, 76% { transform: translateX(-50%) rotate(0); opacity: 1; }
-	100% { transform: translate(-18px, 58px) rotate(-34deg); opacity: 0.2; }
-}
-
-@keyframes aircraft-fragment-one { 0%, 78% { opacity: 0; transform: translate(0); } 82% { opacity: 1; } 100% { opacity: 0; transform: translate(-104px, 55px) rotate(170deg); } }
-@keyframes aircraft-fragment-two { 0%, 77% { opacity: 0; transform: translate(0); } 82% { opacity: 1; } 100% { opacity: 0; transform: translate(116px, 38px) rotate(-145deg); } }
-@keyframes aircraft-fragment-three { 0%, 79% { opacity: 0; transform: translate(0); } 83% { opacity: 1; } 100% { opacity: 0; transform: translate(-69px, -43px) rotate(220deg); } }
-@keyframes aircraft-fragment-four { 0%, 77% { opacity: 0; transform: translate(0); } 81% { opacity: 1; } 100% { opacity: 0; transform: translate(78px, -52px) rotate(-240deg); } }
-@keyframes aircraft-fragment-five { 0%, 80% { opacity: 0; transform: translate(0); } 84% { opacity: 1; } 100% { opacity: 0; transform: translate(-31px, 83px) rotate(300deg); } }
-@keyframes aircraft-fragment-six { 0%, 79% { opacity: 0; transform: translate(0); } 83% { opacity: 1; } 100% { opacity: 0; transform: translate(42px, 91px) rotate(-310deg); } }
 
 .comparison-list {
 	display: grid;

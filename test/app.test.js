@@ -58,6 +58,13 @@ const {
   tabSelectionProviderKey,
   trackerDisplayLabel,
   runwayOutcome,
+  runwayPhysics,
+  runwayScene,
+  runwayApproachSpeed,
+  runwayBrake,
+  runwayGhostNote,
+  runwayHudReadout,
+  settleRunwayCards,
   toggleTabSelectionPreference,
   trendChangeContext,
   updateModelField,
@@ -1014,48 +1021,244 @@ test('pace graphs show ideal, actual, and current cycle position for each provid
   assert.match(html, />Graphs<\/button>/);
 });
 
-test('runway view animates safe stops and projected overruns from depletion timing', () => {
-  const safe = {
-    id: 'safe',
+function runwayModel(overrides = {}) {
+  return {
+    id: 'runway',
     provider: 'Claude',
     metricLabel: 'Weekly limit',
-    actualCum: 0.1,
-    currentHour: 24,
-    remainingHours: 144,
+    actualCum: 0.4,
+    flatCum: 0.4,
+    currentHour: 67.2,
+    remainingHours: 100.8,
     totalHours: 168,
     resetAt: '2099-08-17T14:30:00',
-    projectedHoursToDepletion: 216
+    ...overrides
   };
-  const overrun = {
-    id: 'overrun',
-    provider: 'OpenAI',
-    metricLabel: 'Weekly limit',
+}
+
+// Severity is a scale, not a verdict: every band has to be reachable by moving
+// one number, and the bands have to stay in order.
+test('runway bands walk a continuous margin from ample through off the end', () => {
+  const bandFor = (projectedHoursToDepletion) => runwayPhysics(
+    runwayModel({ projectedHoursToDepletion })
+  );
+
+  assert.equal(bandFor(200).state, 'ample');
+  assert.equal(bandFor(130).state, 'comfortable');
+  assert.equal(bandFor(105).state, 'marginal');
+  assert.equal(bandFor(95).state, 'overrun');
+  assert.equal(bandFor(50).state, 'off-end');
+
+  const severities = [200, 130, 105, 95, 50].map((hours) => bandFor(hours).severity);
+  severities.slice(1).forEach((value, index) => {
+    assert.ok(value > severities[index], `severity should rise: ${severities.join(', ')}`);
+  });
+  assert.equal(bandFor(200).severity, 0);
+  assert.equal(bandFor(20).severity, 1);
+});
+
+test('runway margin is reported in hours either side of the reset', () => {
+  const spare = runwayPhysics(runwayModel({ projectedHoursToDepletion: 124.8 }));
+  assert.equal(Math.round(spare.marginHours), 24);
+  assert.match(spare.detail, /1d/);
+
+  const short = runwayPhysics(runwayModel({ projectedHoursToDepletion: 76.8 }));
+  assert.equal(Math.round(short.marginHours), -24);
+  assert.match(short.detail, /runs dry 1d before the reset/);
+});
+
+// The scene geometry is the measurement, so it has to move with the margin and
+// not with the band. Two cards in the same band at different margins must not
+// draw the same picture.
+test('runway geometry moves continuously with the margin, not with the band', () => {
+  const depthFor = (projectedHoursToDepletion) => runwayScene(
+    runwayPhysics(runwayModel({ projectedHoursToDepletion }))
+  ).endDepth;
+
+  const depths = [260, 200, 150, 120, 105].map(depthFor);
+  depths.slice(1).forEach((value, index) => {
+    assert.ok(value > depths[index], `gate should draw nearer as margin shrinks: ${depths.join(', ')}`);
+  });
+
+  // Two margins inside the same band still differ on screen.
+  assert.equal(runwayPhysics(runwayModel({ projectedHoursToDepletion: 200 })).state, 'ample');
+  assert.equal(runwayPhysics(runwayModel({ projectedHoursToDepletion: 260 })).state, 'ample');
+  assert.notEqual(depthFor(200), depthFor(260));
+
+  // Overrun keeps going the same direction rather than snapping to a crash.
+  const drops = [95, 80, 60, 30].map((hours) => runwayPhysics(runwayModel({ projectedHoursToDepletion: hours })).drop);
+  assert.equal(drops[0] > 0, true);
+  drops.slice(1).forEach((value, index) => {
+    assert.ok(value > drops[index], `drop should deepen: ${drops.join(', ')}`);
+  });
+  assert.equal(drops.at(-1), 1);
+});
+
+// This used to render as a mint badge and a perfect landing, which was the one
+// case where the picture asserted something the data did not support.
+test('runway treats an unmeasurable rate as its own state, not as a safe landing', () => {
+  const physics = runwayPhysics(runwayModel({ actualCum: 0, flatCum: 0, currentHour: 0, projectedHoursToDepletion: null }));
+  assert.equal(physics.state, 'holding');
+  assert.equal(physics.margin, null);
+  assert.equal(physics.marginHours, null);
+  assert.equal(physics.drop, 0);
+  assert.match(physics.detail, /no burn rate/);
+
+  const html = renderRunwayView([runwayModel({ actualCum: 0, flatCum: 0, currentHour: 0, projectedHoursToDepletion: null })]);
+  assert.match(html, /class="runway-card runway-holding"/);
+  assert.doesNotMatch(html, /runway-ample|runway-comfortable/);
+});
+
+test('runway reports an already spent quota as exhausted', () => {
+  const physics = runwayPhysics(runwayModel({ actualCum: 1, currentHour: 120, projectedHoursToDepletion: 0 }));
+  assert.equal(physics.state, 'exhausted');
+  assert.equal(physics.severity, 1);
+  assert.equal(physics.drop, 1);
+});
+
+// Second channel: how hard the approach is, read off the pace delta and
+// independent of whether the landing ends well.
+test('runway approach speed tracks the pace delta independently of the outcome', () => {
+  assert.equal(runwayApproachSpeed(0), 1);
+  assert.ok(runwayApproachSpeed(0.2) > runwayApproachSpeed(0.05));
+  assert.ok(runwayApproachSpeed(-0.2) < 1);
+  assert.equal(runwayApproachSpeed(1), 2.4, 'clamped at the top');
+  assert.equal(runwayApproachSpeed(-1), 0.35, 'clamped at the bottom');
+
+  // Above ideal pace but still stopping in time: fast approach, safe outcome.
+  const hot = runwayPhysics(runwayModel({ actualCum: 0.6, flatCum: 0.4, projectedHoursToDepletion: 200 }));
+  assert.equal(hot.state, 'ample');
+  assert.ok(hot.speed > 1.4, `expected a hot approach, got ${hot.speed}`);
+});
+
+// Third channel: is the burn rate itself rising or falling? Positive is braking.
+test('runway brake reads the direction of the burn rate from history', () => {
+  const at = (minutes) => new Date(Date.UTC(2099, 7, 12, 0, minutes)).toISOString();
+  const steady = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+  const slowing = [0.1, 0.3, 0.5, 0.55, 0.58, 0.6];
+  const building = [0.1, 0.12, 0.15, 0.3, 0.45, 0.6];
+  const historyOf = (values) => values.map((usedPercent, index) => ({ timestamp: at(index * 30), usedPercent }));
+
+  assert.ok(Math.abs(runwayBrake(runwayModel({ usageHistory: historyOf(steady) }))) < 1e-9, 'a constant rate is no trend');
+  assert.ok(runwayBrake(runwayModel({ usageHistory: historyOf(slowing) })) > 0.3);
+  assert.ok(runwayBrake(runwayModel({ usageHistory: historyOf(building) })) < -0.3);
+  assert.equal(runwayBrake(runwayModel({ usageHistory: [] })), 0, 'no history is not a trend');
+});
+
+// The ghost is recomputed from stored history rather than persisted, so it can
+// never disagree with the samples the rest of the dashboard draws.
+test('runway ghost recovers the previous reading and names the change', () => {
+  const at = (minutes) => new Date(Date.UTC(2099, 7, 12, 0, minutes)).toISOString();
+  const model = runwayModel({
     actualCum: 0.5,
-    currentHour: 48,
-    remainingHours: 120,
-    totalHours: 168,
-    resetAt: '2099-08-13T14:30:00',
-    projectedHoursToDepletion: 48
-  };
+    currentHour: 84,
+    remainingHours: 84,
+    projectedHoursToDepletion: 84,
+    usageHistory: [
+      { timestamp: at(0), usedPercent: 0.2 },
+      { timestamp: at(60), usedPercent: 0.5 }
+    ]
+  });
+  const physics = runwayPhysics(model);
+  assert.ok(physics.ghost, 'a second sample an hour back should produce a ghost');
+  assert.ok(physics.ghost.marginHours > physics.marginHours, 'the earlier reading was healthier');
+  assert.match(runwayGhostNote(physics), /worse than 1h ago\./);
+  assert.notEqual(runwayScene(physics).ghostDepth, null);
+
+  // A drop in usage means the cycle reset in between, so the two readings
+  // describe different runways and must not be compared.
+  const acrossReset = runwayPhysics(runwayModel({
+    actualCum: 0.2,
+    currentHour: 84,
+    remainingHours: 84,
+    projectedHoursToDepletion: 84,
+    usageHistory: [
+      { timestamp: at(0), usedPercent: 0.9 },
+      { timestamp: at(60), usedPercent: 0.2 }
+    ]
+  }));
+  assert.equal(acrossReset.ghost, null);
+  assert.equal(runwayGhostNote(acrossReset), '');
+  assert.equal(runwayScene(acrossReset).ghostDepth, null);
+});
+
+test('runway hud reports pace, rate direction, and margin as real numbers', () => {
+  const hud = runwayHudReadout(runwayPhysics(runwayModel({
+    actualCum: 0.58,
+    flatCum: 0.4,
+    projectedHoursToDepletion: 76.8
+  })));
+  assert.equal(hud.pace, '+18%');
+  assert.equal(hud.margin, '−1d');
+  assert.equal(hud.rate, 'STEADY');
+});
+
+test('runway view renders the scene from the numbers rather than from a class', () => {
+  const overrun = runwayModel({ id: 'overrun', provider: 'OpenAI', actualCum: 0.5, currentHour: 48, remainingHours: 120, resetAt: '2099-08-13T14:30:00', projectedHoursToDepletion: 48 });
+  const safe = runwayModel({ id: 'safe', actualCum: 0.1, currentHour: 24, remainingHours: 144, projectedHoursToDepletion: 216 });
   const html = renderRunwayView([overrun, safe]);
 
-  assert.equal(runwayOutcome(safe).state, 'safe');
-  assert.equal(runwayOutcome(overrun).state, 'overrun');
+  assert.equal(runwayOutcome(safe).state, 'ample');
+  assert.equal(runwayOutcome(overrun).state, 'off-end');
   assert.match(html, /Quota Runway/);
   assert.match(html, /data-pace-view="runway" aria-pressed="true">Runway/);
-  assert.equal((html.match(/class="runway-card runway-safe"/g) || []).length, 1);
-  assert.equal((html.match(/class="runway-card runway-overrun"/g) || []).length, 1);
+  assert.equal((html.match(/class="runway-card runway-ample"/g) || []).length, 1);
+  assert.equal((html.match(/class="runway-card runway-off-end"/g) || []).length, 1);
+
+  // Every card carries its geometry, so the picture is correct with no script.
+  assert.equal((html.match(/--runway-end: /g) || []).length, 2);
+  assert.equal((html.match(/--runway-severity: /g) || []).length, 2);
+  assert.equal((html.match(/--runway-speed: /g) || []).length, 2);
+  assert.equal((html.match(/data-runway-end="/g) || []).length, 2);
+
   assert.match(html, /class="aircraft-nose"/);
-  assert.match(html, /class="aircraft-tailplane aircraft-tailplane-left"/);
-  assert.match(html, /class="aircraft-fragments"/);
   assert.match(html, /class="runway-abyss"/);
   assert.match(html, /class="runway-end"/);
   assert.match(html, /class="runway-pavement"/);
   assert.match(html, /class="runway-drop-face"/);
-  assert.match(html, /Stops with room/);
-  assert.match(html, /Overrun projected/);
+  assert.match(html, /Ample runway/);
+  assert.match(html, /Off the end/);
+  assert.match(html, /Δ PACE/);
+  assert.match(html, /to dry/);
+  assert.match(html, /<dt>Margin at reset<\/dt><dd>3d spare/);
   assert.match(html, /<dt>Reset<\/dt><dd>Thu, 13 Aug 2099 at 14:30/);
 });
+
+// The from-values only exist so a refresh can move between two states the
+// markup would each render correctly on its own.
+test('runway cards settle from the previous geometry on the next render', () => {
+  const model = runwayModel({ id: 'settling', projectedHoursToDepletion: 200 });
+  const first = renderRunwayView([model]);
+  assert.doesNotMatch(first, /data-runway-from=/, 'nothing to move from on the first render');
+
+  const frames = [];
+  const cards = [createRunwayCardStub(first)];
+  settleRunwayCards({ querySelectorAll: () => cards });
+
+  const second = renderRunwayView([runwayModel({ id: 'settling', projectedHoursToDepletion: 105 })]);
+  assert.match(second, /data-runway-from="/);
+  const moving = createRunwayCardStub(second, frames);
+  settleRunwayCards({ querySelectorAll: () => [moving] });
+
+  // Set back to where the scene already was, then handed the new value on the
+  // next frame -- which is what makes it a transition rather than a jump.
+  assert.equal(moving.style.values['--runway-end'], cards[0].attributes['data-runway-end']);
+  assert.equal(frames.length, 1);
+  frames[0]();
+  assert.equal(moving.style.values['--runway-end'], moving.attributes['data-runway-end']);
+});
+
+function createRunwayCardStub(html, frames) {
+  const attributes = {};
+  for (const [, name, value] of html.matchAll(/(data-runway-[a-z]+)="([^"]*)"/g)) attributes[name] = value;
+  globalThis.requestAnimationFrame = frames ? (callback) => frames.push(callback) : undefined;
+  return {
+    attributes,
+    offsetWidth: 0,
+    style: { values: {}, setProperty(name, value) { this.values[name] = value; } },
+    getAttribute(name) { return Object.hasOwn(attributes, name) ? attributes[name] : null; }
+  };
+}
 
 test('projected depletion distinguishes exhaustion before and after reset', () => {
   assert.deepEqual(

@@ -530,42 +530,6 @@ function latestModelUpdate(models) {
 	return newest > 0 ? newest : null;
 }
 
-function projectedDepletionContext(model) {
-	const actual = clamp(Number(model?.actualCum) || 0, 0, 1);
-	const totalHours = Math.max(0, Number(model?.totalHours) || Number(model?.daysInCycle) * Number(model?.hoursPerDay) || 0);
-	const inferredCurrentHour = totalHours * clamp(Number(model?.flatCum) || 0, 0, 1);
-	const currentHour = clamp(Number.isFinite(Number(model?.currentHour)) ? Number(model.currentHour) : inferredCurrentHour, 0, totalHours);
-	const remainingHours = Math.max(0, Number.isFinite(Number(model?.remainingHours))
-		? Number(model.remainingHours)
-		: totalHours - currentHour);
-	const averageUsagePerHour = Number.isFinite(Number(model?.averageUsagePerHour))
-		? Math.max(0, Number(model.averageUsagePerHour))
-		: currentHour > 0 ? actual / currentHour : 0;
-	const hasProjectedHours = model?.projectedHoursToDepletion !== null
-		&& model?.projectedHoursToDepletion !== ''
-		&& Number.isFinite(Number(model?.projectedHoursToDepletion));
-	const projectedHours = hasProjectedHours
-		? Math.max(0, Number(model.projectedHoursToDepletion))
-		: actual >= 1 ? 0 : averageUsagePerHour > 0 ? (1 - actual) / averageUsagePerHour : null;
-
-	if (projectedHours === null) {
-		return { value: '—', note: 'not enough data', tone: 'steady', label: 'Projected depletion is unavailable until usage has increased' };
-	}
-	if (projectedHours <= 0) {
-		return { value: 'Now', note: 'quota depleted', tone: 'warning', label: 'Quota is already depleted' };
-	}
-	const withinCycle = projectedHours <= remainingHours;
-	const value = formatDurationHours(projectedHours);
-	return {
-		value: withinCycle ? value : '—',
-		note: withinCycle ? 'before reset' : 'not before reset',
-		tone: withinCycle ? 'warning' : 'healthy',
-		label: withinCycle
-			? `At the current average usage rate, depletion is projected in ${value}, before the reset`
-			: 'Quota is not projected to deplete before the reset'
-	};
-}
-
 function metricLabel(model) {
 	return String(model?.metricLabel || model?.quotaLabel || model?.model || 'Usage limit').trim();
 }
@@ -898,6 +862,7 @@ function render() {
 	updateNavigation(page);
 	updateDocumentTitle(enabledModels);
 	if (page === 'setup' && pendingSettingsId) revealPendingSettings(container);
+	settleRunwayCards(container);
 }
 
 function updateDocumentTitle(models) {
@@ -1189,32 +1154,263 @@ function renderPaceGraphs(models) {
 	`;
 }
 
-function runwayOutcome(model) {
-	const depletion = projectedDepletionContext(model);
-	const overrun = depletion.note === 'before reset' || depletion.note === 'quota depleted';
-	if (overrun) {
-		return {
-			state: 'overrun',
-			status: depletion.note === 'quota depleted' ? 'Runway exhausted' : 'Overrun projected',
-			detail: depletion.note === 'quota depleted'
-				? 'The quota is already depleted.'
-				: `At the current burn rate, the quota runs out in ${depletion.value}, before reset.`,
-			depletion
-		};
+// The runway is the quota you have left; the distance you must cover before you
+// are allowed to stop is the time to the reset. You land safely when the quota
+// outlasts the cycle. Every number the scene draws with comes off that one
+// ratio, so the picture moves continuously with severity instead of flipping
+// between two pre-baked outcomes.
+const RUNWAY_PERSPECTIVE = 0.55;
+// Where the parked aircraft sits, as a percentage down the strip. 0 is the
+// horizon, 100 is directly under the camera, so larger is nearer.
+const RUNWAY_STOP_DEPTH = 88;
+const RUNWAY_HORIZON_DEPTH = 4;
+// How much surplus (margin - 1) fills the whole visible strip, and how much
+// shortfall reads as a total loss. Both are display spans, not thresholds.
+const RUNWAY_SURPLUS_SPAN = 1.5;
+const RUNWAY_DROP_SPAN = 0.5;
+const RUNWAY_MIN_GHOST_GAP_MS = 60_000;
+// Last settled scene geometry per tracker, so a re-render can transition from
+// where the scene already was instead of snapping. Keyed by tracker id.
+const runwaySettled = new Map();
+
+function runwayDepth(fraction) {
+	// Ground-plane projection: near distance spreads out, far distance
+	// compresses toward the horizon. Without this a runway drawn from linear
+	// numbers reads as a bar tipped on its side rather than as a surface.
+	const value = clamp(Number(fraction) || 0, 0, 1);
+	const screen = (value * (1 + RUNWAY_PERSPECTIVE)) / (value + RUNWAY_PERSPECTIVE);
+	// The gate never quite reaches the horizon, so even an ample runway shows
+	// the threshold it is measured against rather than trailing off to nothing.
+	return RUNWAY_HORIZON_DEPTH + (RUNWAY_STOP_DEPTH - RUNWAY_HORIZON_DEPTH) * (1 - screen);
+}
+
+// Shared by projectedDepletionContext and the runway scene. The two disagreed
+// about nothing yet, but they were deriving the same five numbers side by side,
+// which is exactly how the provider registry drifted in the first place.
+function runwayTiming(model) {
+	const actual = clamp(Number(model?.actualCum) || 0, 0, 1);
+	const totalHours = Math.max(0, Number(model?.totalHours) || Number(model?.daysInCycle) * Number(model?.hoursPerDay) || 0);
+	const inferredCurrentHour = totalHours * clamp(Number(model?.flatCum) || 0, 0, 1);
+	const currentHour = clamp(Number.isFinite(Number(model?.currentHour)) ? Number(model.currentHour) : inferredCurrentHour, 0, totalHours);
+	const remainingHours = Math.max(0, Number.isFinite(Number(model?.remainingHours))
+		? Number(model.remainingHours)
+		: totalHours - currentHour);
+	const averageUsagePerHour = Number.isFinite(Number(model?.averageUsagePerHour))
+		? Math.max(0, Number(model.averageUsagePerHour))
+		: currentHour > 0 ? actual / currentHour : 0;
+	const hasProjectedHours = model?.projectedHoursToDepletion !== null
+		&& model?.projectedHoursToDepletion !== ''
+		&& Number.isFinite(Number(model?.projectedHoursToDepletion));
+	const projectedHours = hasProjectedHours
+		? Math.max(0, Number(model.projectedHoursToDepletion))
+		: actual >= 1 ? 0 : averageUsagePerHour > 0 ? (1 - actual) / averageUsagePerHour : null;
+	return { actual, totalHours, currentHour, remainingHours, averageUsagePerHour, projectedHours };
+}
+
+function projectedDepletionContext(model) {
+	const { projectedHours, remainingHours } = runwayTiming(model);
+	if (projectedHours === null) {
+		return { value: '—', note: 'not enough data', tone: 'steady', label: 'Projected depletion is unavailable until usage has increased' };
 	}
-	if (depletion.note === 'not enough data') {
-		return {
-			state: 'safe',
-			status: 'Holding position',
-			detail: 'No measurable burn rate yet; no overrun is projected.',
-			depletion
-		};
+	if (projectedHours <= 0) {
+		return { value: 'Now', note: 'quota depleted', tone: 'warning', label: 'Quota is already depleted' };
 	}
+	const withinCycle = projectedHours <= remainingHours;
+	const value = formatDurationHours(projectedHours);
 	return {
-		state: 'safe',
-		status: 'Stops with room',
-		detail: 'No depletion is projected before this reset.',
-		depletion
+		value: withinCycle ? value : '—',
+		note: withinCycle ? 'before reset' : 'not before reset',
+		tone: withinCycle ? 'warning' : 'healthy',
+		label: withinCycle
+			? `At the current average usage rate, depletion is projected in ${value}, before the reset`
+			: 'Quota is not projected to deplete before the reset'
+	};
+}
+
+// Bands exist only to name and colour a point on a continuous scale. Nothing in
+// the scene geometry branches on them -- adding a band changes the wording, not
+// the picture.
+function runwayBand(margin) {
+	if (margin >= 1.5) return { state: 'ample', status: 'Ample runway' };
+	if (margin >= 1.15) return { state: 'comfortable', status: 'Comfortable margin' };
+	if (margin >= 1) return { state: 'marginal', status: 'Stops on the numbers' };
+	if (margin >= 0.85) return { state: 'overrun', status: 'Overrun projected' };
+	return { state: 'off-end', status: 'Off the end' };
+}
+
+// Second channel: how hard the approach is, independent of whether it ends well.
+// A tracker well above ideal pace should look fast even when it still stops in
+// time, because that is the part still worth acting on.
+function runwayApproachSpeed(paceDelta) {
+	return clamp(1 + (Number(paceDelta) || 0) * 2.5, 0.35, 2.4);
+}
+
+// Third channel: is the burn rate itself rising or falling? Positive is braking.
+function runwayBrake(model) {
+	const history = normalizedHistory(model).slice(-12);
+	if (history.length < 4) return 0;
+	const middle = Math.floor(history.length / 2);
+	const rateBetween = (from, to) => {
+		const hours = (to.at - from.at) / 3_600_000;
+		return hours > 0 ? (to.used - from.used) / hours : null;
+	};
+	const earlier = rateBetween(history[0], history[middle]);
+	const recent = rateBetween(history[middle], history.at(-1));
+	if (earlier === null || recent === null || earlier <= 0) return 0;
+	return clamp((earlier - recent) / earlier, -1, 1);
+}
+
+// Where the runway end sat at the previous reading, recomputed from the stored
+// history rather than persisted. Nothing new has to be written to localStorage,
+// and the ghost cannot go stale against a cleared or migrated preference.
+function runwayGhost(model, timing) {
+	const history = normalizedHistory(model);
+	if (history.length < 2) return null;
+	const anchor = history.at(-1);
+	const previous = [...history].reverse().find((sample) => anchor.at - sample.at >= RUNWAY_MIN_GHOST_GAP_MS);
+	// A drop in usage means the cycle reset between the two samples, so the
+	// earlier reading describes a different runway and comparing them says
+	// nothing.
+	if (!previous || previous.used <= 0 || previous.used > anchor.used) return null;
+	const elapsedHours = (anchor.at - previous.at) / 3_600_000;
+	const currentHour = timing.currentHour - elapsedHours;
+	const remainingHours = timing.remainingHours + elapsedHours;
+	if (currentHour <= 0 || remainingHours <= 0) return null;
+	const rate = previous.used / currentHour;
+	if (!(rate > 0)) return null;
+	const rollHours = (1 - previous.used) / rate;
+	return {
+		margin: rollHours / remainingHours,
+		marginHours: rollHours - remainingHours,
+		elapsedHours
+	};
+}
+
+function runwayPhysics(model) {
+	const timing = runwayTiming(model);
+	const ideal = clamp(Number(model?.flatCum) || 0, 0, 1);
+	const paceDelta = timing.actual - ideal;
+	const shared = {
+		paceDelta,
+		speed: runwayApproachSpeed(paceDelta),
+		brake: runwayBrake(model),
+		rollHours: timing.projectedHours,
+		runwayHours: timing.remainingHours,
+		depletion: projectedDepletionContext(model),
+		ghost: null
+	};
+
+	// No measurable rate is not the same thing as a safe landing, and used to
+	// render as one. It gets its own state and no verdict.
+	if (timing.projectedHours === null) {
+		return {
+			...shared,
+			state: 'holding',
+			status: 'Holding — no rate yet',
+			detail: 'Usage has not moved yet, so there is no burn rate to project a stopping distance from.',
+			margin: null,
+			marginHours: null,
+			severity: 0,
+			surplus: RUNWAY_SURPLUS_SPAN,
+			drop: 0
+		};
+	}
+	if (timing.projectedHours <= 0) {
+		return {
+			...shared,
+			state: 'exhausted',
+			status: 'Runway exhausted',
+			detail: 'The quota is already depleted; nothing is left to spend before the reset.',
+			margin: 0,
+			marginHours: -timing.remainingHours,
+			severity: 1,
+			surplus: -RUNWAY_DROP_SPAN,
+			drop: 1
+		};
+	}
+
+	// A reset that has just landed leaves no distance still to cover, which is a
+	// safe stop rather than a division by zero.
+	const runwayHours = Math.max(timing.remainingHours, 1 / 60);
+	const margin = timing.projectedHours / runwayHours;
+	const marginHours = timing.projectedHours - timing.remainingHours;
+	const band = runwayBand(margin);
+	const surplus = clamp(margin - 1, -RUNWAY_DROP_SPAN, RUNWAY_SURPLUS_SPAN);
+	return {
+		...shared,
+		state: band.state,
+		status: band.status,
+		detail: runwayDetail(band.state, marginHours),
+		margin,
+		marginHours,
+		severity: clamp((1.5 - margin) / 0.8, 0, 1),
+		surplus,
+		drop: surplus < 0 ? clamp(-surplus / RUNWAY_DROP_SPAN, 0, 1) : 0,
+		ghost: runwayGhost(model, timing)
+	};
+}
+
+function runwayDetail(state, marginHours) {
+	const span = formatDurationHours(Math.abs(marginHours));
+	if (state === 'ample') return `The quota outlasts this reset by ${span}.`;
+	if (state === 'comfortable') return `The quota clears this reset with ${span} to spare.`;
+	if (state === 'marginal') return `Only ${span} of quota sits beyond the reset — a small rate increase overruns it.`;
+	if (state === 'overrun') return `The quota runs dry ${span} before the reset.`;
+	return `The quota runs dry ${span} before the reset, well short of it.`;
+}
+
+// Screen geometry, kept apart from the physics so the mapping from a margin to a
+// picture is one readable function rather than arithmetic sprinkled through the
+// template.
+function runwayScene(physics) {
+	const endDepth = physics.drop > 0
+		? RUNWAY_STOP_DEPTH + physics.drop * 9
+		: runwayDepth(Math.max(physics.surplus, 0) / RUNWAY_SURPLUS_SPAN);
+	const ghost = physics.ghost;
+	const ghostSurplus = ghost ? clamp(ghost.margin - 1, -RUNWAY_DROP_SPAN, RUNWAY_SURPLUS_SPAN) : null;
+	const ghostDepth = ghostSurplus === null
+		? null
+		: ghostSurplus < 0
+			? RUNWAY_STOP_DEPTH + clamp(-ghostSurplus / RUNWAY_DROP_SPAN, 0, 1) * 9
+			: runwayDepth(ghostSurplus / RUNWAY_SURPLUS_SPAN);
+	return { endDepth, ghostDepth };
+}
+
+function runwayGhostNote(physics) {
+	if (!physics.ghost || physics.marginHours === null) return '';
+	const change = physics.marginHours - physics.ghost.marginHours;
+	const ago = formatDurationHours(physics.ghost.elapsedHours);
+	if (Math.abs(change) * 60 < 6) return `Unchanged over the last ${ago}.`;
+	const amount = formatDurationHours(Math.abs(change));
+	return change < 0 ? `${amount} worse than ${ago} ago.` : `${amount} better than ${ago} ago.`;
+}
+
+function runwayHudReadout(physics) {
+	const points = Math.round(Math.abs(physics.paceDelta) * 100);
+	const sign = points === 0 ? '' : physics.paceDelta > 0 ? '+' : '−';
+	const margin = physics.marginHours === null
+		? '—'
+		: `${physics.marginHours < 0 ? '−' : '+'}${formatDurationHours(Math.abs(physics.marginHours))}`;
+	const rate = Math.abs(physics.brake) < 0.08
+		? 'STEADY'
+		: physics.brake > 0
+			? `BRAKING ${Math.round(physics.brake * 100)}%`
+			: `BUILDING ${Math.round(-physics.brake * 100)}%`;
+	return { pace: `${sign}${points}%`, margin, rate };
+}
+
+// Kept as the named entry point the overview and the tests already use. It is a
+// thin band-and-wording view over runwayPhysics.
+function runwayOutcome(model) {
+	const physics = runwayPhysics(model);
+	return {
+		state: physics.state,
+		status: physics.status,
+		detail: physics.detail,
+		margin: physics.margin,
+		marginHours: physics.marginHours,
+		severity: physics.severity,
+		depletion: physics.depletion
 	};
 }
 
@@ -1222,32 +1418,54 @@ function renderRunwayView(models) {
 	const ordered = sortTrackersAlphabetically(models).slice(0, 6);
 	if (!ordered.length) return renderEmptyPacePanel('runway');
 	const cards = ordered.map((model) => {
-		const outcome = runwayOutcome(model);
+		const physics = runwayPhysics(model);
+		const scene = runwayScene(physics);
+		const hud = runwayHudReadout(physics);
+		const ghostNote = runwayGhostNote(physics);
 		const reset = effectiveResetDate(model);
 		const resetDateTime = reset ? formatResetDateTime(reset) : 'pending';
 		const resetCountdown = reset ? `in ${formatCountdown(reset)}` : '';
 		const actual = clamp(Number(model.actualCum) || 0, 0, 1);
-		const sceneLabel = `${trackerDisplayLabel(model)}: ${outcome.status}. ${outcome.detail}`;
+		const marginLabel = physics.marginHours === null
+			? 'not projectable yet'
+			: physics.marginHours < 0
+				? `${formatDurationHours(-physics.marginHours)} short`
+				: `${formatDurationHours(physics.marginHours)} spare`;
+		const gateLabel = physics.rollHours === null
+			? 'no rate yet'
+			: physics.rollHours <= 0 ? 'quota dry' : `${formatDurationHours(physics.rollHours)} to dry`;
+		const sceneLabel = `${trackerDisplayLabel(model)}: ${physics.status}. ${physics.detail}${ghostNote ? ` ${ghostNote}` : ''} Pace ${hud.pace} against ideal, burn rate ${hud.rate.toLowerCase()}.`;
+		// The resting geometry is the measurement, so it is written into the
+		// style attribute and is correct with no script at all. The from-values
+		// only let settleRunwayCards() supply frames between two correct states.
+		const previous = runwaySettled.get(String(model.id ?? ''));
 		return `
-			<article class="runway-card runway-${outcome.state}">
+			<article class="runway-card runway-${physics.state}"
+				style="--runway-end: ${scene.endDepth.toFixed(2)}; --runway-drop: ${physics.drop.toFixed(3)}; --runway-severity: ${physics.severity.toFixed(3)}; --runway-speed: ${physics.speed.toFixed(3)}; --runway-brake: ${physics.brake.toFixed(3)}; --runway-ghost: ${(scene.ghostDepth ?? scene.endDepth).toFixed(2)}"
+				data-runway-id="${escapeHtml(String(model.id ?? ''))}"
+				data-runway-end="${scene.endDepth.toFixed(2)}"
+				data-runway-drop="${physics.drop.toFixed(3)}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.end.toFixed(2)},${previous.drop.toFixed(3)}"` : ''}>
 				<header class="runway-card-header">
 					<div><strong>${escapeHtml(trackerDisplayLabel(model))}</strong><span>${escapeHtml(cycleLabel(model))} · ${formatPercent(actual)} used</span></div>
-					<span class="runway-outcome"><i></i>${escapeHtml(outcome.status)}</span>
+					<span class="runway-outcome"><i></i>${escapeHtml(physics.status)}</span>
 				</header>
 				<div class="runway-stage" role="img" aria-label="${escapeHtml(sceneLabel)}">
 					<div class="runway-sky" aria-hidden="true"><i></i><i></i><i></i></div>
 					<div class="runway-horizon" aria-hidden="true"></div>
 					<div class="runway-abyss" aria-hidden="true"></div>
 					<div class="runway-strip" aria-hidden="true">
+						<div class="runway-pavement">
+							<div class="runway-centerline"></div>
+						</div>
+						${scene.ghostDepth === null ? '' : '<div class="runway-ghost-line"></div>'}
 						<div class="runway-end">
-							<div class="runway-pavement">
-								<div class="runway-centerline">${Array.from({ length: 8 }, () => '<i></i>').join('')}</div>
-							</div>
 							<div class="runway-drop-face"></div>
 							<div class="runway-threshold"><span></span><span></span><span></span><span></span><span></span></div>
 						</div>
 					</div>
+					<div class="runway-gate-label" aria-hidden="true"><span>${escapeHtml(gateLabel)}</span></div>
 					<div class="runway-brake-glow" aria-hidden="true"></div>
+					<div class="runway-heat" aria-hidden="true"></div>
 					<div class="aircraft-rig" aria-hidden="true">
 						<div class="aircraft-main">
 							<i class="aircraft-shadow"></i>
@@ -1263,11 +1481,11 @@ function renderRunwayView(models) {
 						<div class="aircraft-fragments"><i></i><i></i><i></i><i></i><i></i><i></i></div>
 					</div>
 					<div class="runway-impact" aria-hidden="true"><i></i><i></i><i></i></div>
-					<div class="runway-hud" aria-hidden="true"><span>TAIL CAM</span><span>${outcome.state === 'safe' ? 'BRAKE' : 'OVERRUN'}</span></div>
+					<div class="runway-hud" aria-hidden="true"><span>Δ PACE ${escapeHtml(hud.pace)}</span><span>${escapeHtml(hud.rate)}</span><span class="runway-hud-margin">${escapeHtml(hud.margin)}</span></div>
 				</div>
 				<footer class="runway-card-footer">
-					<p>${escapeHtml(outcome.detail)}</p>
-					<dl><div><dt>Projected depletion</dt><dd>${escapeHtml(outcome.depletion.value)}<em>${escapeHtml(outcome.depletion.note)}</em></dd></div><div><dt>Reset</dt><dd>${escapeHtml(resetDateTime)}${resetCountdown ? `<em>${escapeHtml(resetCountdown)}</em>` : ''}</dd></div></dl>
+					<p>${escapeHtml(physics.detail)}${ghostNote ? ` <em>${escapeHtml(ghostNote)}</em>` : ''}</p>
+					<dl><div><dt>Margin at reset</dt><dd>${escapeHtml(marginLabel)}<em>${escapeHtml(physics.depletion.note)}</em></dd></div><div><dt>Reset</dt><dd>${escapeHtml(resetDateTime)}${resetCountdown ? `<em>${escapeHtml(resetCountdown)}</em>` : ''}</dd></div></dl>
 				</footer>
 			</article>
 		`;
@@ -1275,12 +1493,37 @@ function renderRunwayView(models) {
 	return `
 		<article class="panel chart-panel runway-panel">
 			<div class="panel-heading">
-				<div><h2>Quota Runway</h2><p class="runway-intro">Current burn rate translated into stopping distance.</p></div>
-				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span><i class="runway-safe-key"></i>Stops before reset</span><span><i class="runway-overrun-key"></i>Quota depleted first</span></div></div>
+				<div><h2>Quota Runway</h2><p class="runway-intro">The runway is the quota you have left. The distance to cover is the time to reset. The gate ahead is where the quota runs dry.</p></div>
+				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-ghost-key"></i>Previous reading</span></div></div>
 			</div>
 			<div class="runway-grid-layout">${cards}</div>
 		</article>
 	`;
+}
+
+// Moves each scene from where it last settled to where the new numbers put it.
+// Both ends are values the markup renders statically on its own; this only
+// supplies the frames in between, so a refresh reads as the runway shortening
+// rather than as a scene rebuilding itself.
+function settleRunwayCards(root) {
+	if (!root || typeof root.querySelectorAll !== 'function') return;
+	root.querySelectorAll('.runway-card[data-runway-end]').forEach((card) => {
+		const end = Number(card.getAttribute('data-runway-end'));
+		const drop = Number(card.getAttribute('data-runway-drop'));
+		if (!Number.isFinite(end) || !Number.isFinite(drop)) return;
+		runwaySettled.set(card.getAttribute('data-runway-id') || '', { end, drop });
+		const from = (card.getAttribute('data-runway-from') || '').split(',').map(Number);
+		if (from.length !== 2 || !from.every(Number.isFinite)) return;
+		if (Math.abs(from[0] - end) < 0.01 && Math.abs(from[1] - drop) < 0.001) return;
+		if (typeof requestAnimationFrame !== 'function') return;
+		card.style.setProperty('--runway-end', from[0].toFixed(2));
+		card.style.setProperty('--runway-drop', from[1].toFixed(3));
+		void card.offsetWidth;
+		requestAnimationFrame(() => {
+			card.style.setProperty('--runway-end', end.toFixed(2));
+			card.style.setProperty('--runway-drop', drop.toFixed(3));
+		});
+	});
 }
 
 function renderTrendChart(models) {
@@ -2128,6 +2371,15 @@ if (typeof module === 'object' && module.exports) {
 		tabSelectionProviderKey,
 		trackerDisplayLabel,
 		runwayOutcome,
+		runwayPhysics,
+		runwayScene,
+		runwayBand,
+		runwayBrake,
+		runwayApproachSpeed,
+		runwayGhostNote,
+		runwayHudReadout,
+		runwayTiming,
+		settleRunwayCards,
 		toggleTabSelectionPreference,
 		trendChangeContext,
 		updateModelField,
