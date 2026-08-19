@@ -1175,8 +1175,8 @@ const RUNWAY_DROP_SPAN = 0.5;
 const RUNWAY_MIN_GHOST_GAP_MS = 60_000;
 // Every scene value the card publishes, and the subset that is applied once
 // rather than transitioned between readings.
-const RUNWAY_SCENE_PROPERTIES = Object.freeze(['severity', 'speed', 'brake', 'ghost', 'end', 'drop']);
-const RUNWAY_STATIC_PROPERTIES = Object.freeze(['severity', 'speed', 'brake', 'ghost']);
+const RUNWAY_SCENE_PROPERTIES = Object.freeze(['severity', 'speed', 'brake', 'ghost', 'ghost-scale', 'ghost-dir', 'approach', 'end', 'drop']);
+const RUNWAY_STATIC_PROPERTIES = Object.freeze(['severity', 'speed', 'brake', 'ghost', 'ghost-scale', 'ghost-dir', 'approach']);
 // Last settled scene geometry per tracker, so a re-render can transition from
 // where the scene already was instead of snapping. Keyed by tracker id.
 const runwaySettled = new Map();
@@ -1304,6 +1304,7 @@ function runwayPhysics(model) {
 		brake: runwayBrake(model),
 		rollHours: timing.projectedHours,
 		runwayHours: timing.remainingHours,
+		cycleHours: timing.totalHours,
 		depletion: projectedDepletionContext(model),
 		ghost: null
 	};
@@ -1370,18 +1371,79 @@ function runwayDetail(state, marginHours) {
 // Screen geometry, kept apart from the physics so the mapping from a margin to a
 // picture is one readable function rather than arithmetic sprinkled through the
 // template.
+function runwayGateDepth(surplus, drop) {
+	return drop > 0
+		? RUNWAY_STOP_DEPTH + drop * 9
+		: runwayDepth(Math.max(surplus, 0) / RUNWAY_SURPLUS_SPAN);
+}
+
+// A ghost further from the camera than the aircraft is drawn smaller, or the
+// scene reads as two aircraft side by side rather than one behind the other.
+function runwayGhostScale(depth) {
+	// Capped well below the real airframe: a ghost that grows to match it stops
+	// reading as a marker and starts competing with the aircraft it annotates.
+	return clamp(0.14 + 0.52 * (depth / RUNWAY_STOP_DEPTH), 0.14, 0.66);
+}
+
 function runwayScene(physics) {
-	const endDepth = physics.drop > 0
-		? RUNWAY_STOP_DEPTH + physics.drop * 9
-		: runwayDepth(Math.max(physics.surplus, 0) / RUNWAY_SURPLUS_SPAN);
-	const ghost = physics.ghost;
-	const ghostSurplus = ghost ? clamp(ghost.margin - 1, -RUNWAY_DROP_SPAN, RUNWAY_SURPLUS_SPAN) : null;
-	const ghostDepth = ghostSurplus === null
-		? null
-		: ghostSurplus < 0
-			? RUNWAY_STOP_DEPTH + clamp(-ghostSurplus / RUNWAY_DROP_SPAN, 0, 1) * 9
-			: runwayDepth(ghostSurplus / RUNWAY_SURPLUS_SPAN);
-	return { endDepth, ghostDepth };
+	const endDepth = runwayGateDepth(physics.surplus, physics.drop);
+
+	// Once the quota is gone there is no runway left to measure, only time. The
+	// ghost stops being the previous reading and becomes the reset itself,
+	// waiting down the runway at a distance set by how long is left, so the
+	// wreck closes on it as the wait runs down. It is drawn differently because
+	// it means something different -- one shape with two meanings would be the
+	// kind of thing that makes a chart lie.
+	if (physics.state === 'exhausted' && physics.runwayHours > 0 && physics.cycleHours > 0) {
+		const waiting = clamp(physics.runwayHours / physics.cycleHours, 0, 1);
+		const depth = runwayDepth(waiting);
+		return {
+			endDepth,
+			ghost: {
+				kind: 'reset',
+				depth,
+				scale: runwayGhostScale(depth),
+				direction: 0,
+				// The crawl is driven by the remaining wait, so a re-render
+				// restarts it from a freshly computed distance rather than
+				// drifting out of step with the clock.
+				approachSeconds: Math.round(clamp(physics.runwayHours, 0, 24 * 14) * 3600)
+			}
+		};
+	}
+
+	if (!physics.ghost || physics.marginHours === null) return { endDepth, ghost: null };
+
+	const ghostSurplus = clamp(physics.ghost.margin - 1, -RUNWAY_DROP_SPAN, RUNWAY_SURPLUS_SPAN);
+	const ghostDrop = ghostSurplus < 0 ? clamp(-ghostSurplus / RUNWAY_DROP_SPAN, 0, 1) : 0;
+	const ghostGate = runwayGateDepth(ghostSurplus, ghostDrop);
+
+	// The aircraft is parked at the camera, so the ghost is offset by however
+	// far the gate has moved since the previous reading. A gate that came nearer
+	// means ground was covered: the aircraft is now ahead of where it was, and
+	// the ghost falls behind it.
+	const change = physics.marginHours - physics.ghost.marginHours;
+	const direction = Math.abs(change) * 60 < 6 ? 0 : change < 0 ? 1 : -1;
+	// Two aircraft drawn almost on top of each other read as one with a shadow,
+	// so a real difference is given a floor of separation. The gap is a
+	// direction, not a distance -- the footer carries the actual hours.
+	// The camera rides with the aircraft, so there is almost no runway behind it
+	// to draw on: a ghost placed past the airframe lands off the bottom of the
+	// stage, or behind an aircraft that fills it. So the ghost is always set down
+	// ahead, its distance carrying how much changed and its colour which way --
+	// rose when ground was lost since the last reading, mint when it was gained.
+	const offset = Math.abs(endDepth - ghostGate);
+	const depth = clamp(RUNWAY_STOP_DEPTH - Math.max(offset, direction === 0 ? 0 : 12), 10, RUNWAY_STOP_DEPTH);
+	return {
+		endDepth,
+		ghost: {
+			kind: 'previous',
+			depth,
+			scale: runwayGhostScale(depth),
+			direction,
+			approachSeconds: 0
+		}
+	};
 }
 
 function runwayGhostNote(physics) {
@@ -1458,7 +1520,10 @@ function renderRunwayView(models) {
 				data-runway-severity="${physics.severity.toFixed(3)}"
 				data-runway-speed="${physics.speed.toFixed(3)}"
 				data-runway-brake="${physics.brake.toFixed(3)}"
-				data-runway-ghost="${(scene.ghostDepth ?? scene.endDepth).toFixed(2)}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.end.toFixed(2)},${previous.drop.toFixed(3)}"` : ''}>
+				data-runway-ghost="${(scene.ghost?.depth ?? scene.endDepth).toFixed(2)}"
+				data-runway-ghost-scale="${(scene.ghost?.scale ?? 1).toFixed(3)}"
+				data-runway-ghost-dir="${scene.ghost?.direction ?? 0}"
+				data-runway-approach="${scene.ghost?.approachSeconds ?? 0}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.end.toFixed(2)},${previous.drop.toFixed(3)}"` : ''}>
 				<header class="runway-card-header">
 					<div><strong>${escapeHtml(trackerDisplayLabel(model))}</strong><span>${escapeHtml(cycleLabel(model))} · ${formatPercent(actual)} used</span></div>
 					<span class="runway-outcome"><i></i>${escapeHtml(physics.status)}</span>
@@ -1472,12 +1537,20 @@ function renderRunwayView(models) {
 							<div class="runway-rush"></div>
 							<div class="runway-centerline"></div>
 						</div>
-						${scene.ghostDepth === null ? '' : '<div class="runway-ghost-line"></div>'}
 						<div class="runway-end">
 							<div class="runway-drop-face"></div>
 							<div class="runway-threshold"><span></span><span></span><span></span><span></span><span></span></div>
 						</div>
 					</div>
+					${scene.ghost ? `
+					<div class="runway-ghost-link runway-ghost-${scene.ghost.kind}" aria-hidden="true"></div>
+					<div class="runway-ghost-plane runway-ghost-${scene.ghost.kind}" aria-hidden="true">
+						<i class="ghost-wing ghost-wing-left"></i>
+						<i class="ghost-wing ghost-wing-right"></i>
+						<i class="ghost-tailplane ghost-tailplane-left"></i>
+						<i class="ghost-tailplane ghost-tailplane-right"></i>
+						<i class="ghost-fuselage"></i>
+					</div>` : ''}
 					<div class="runway-gate-label" aria-hidden="true"><span>${escapeHtml(gateLabel)}</span></div>
 					<div class="runway-brake-glow" aria-hidden="true"></div>
 					<div class="runway-heat" aria-hidden="true"></div>

@@ -1217,7 +1217,7 @@ test('runway ghost recovers the previous reading and names the change', () => {
   assert.ok(physics.ghost, 'a second sample an hour back should produce a ghost');
   assert.ok(physics.ghost.marginHours > physics.marginHours, 'the earlier reading was healthier');
   assert.match(runwayGhostNote(physics), /worse than 1h ago\./);
-  assert.notEqual(runwayScene(physics).ghostDepth, null);
+  assert.notEqual(runwayScene(physics).ghost, null);
 
   // A drop in usage means the cycle reset in between, so the two readings
   // describe different runways and must not be compared.
@@ -1233,7 +1233,63 @@ test('runway ghost recovers the previous reading and names the change', () => {
   }));
   assert.equal(acrossReset.ghost, null);
   assert.equal(runwayGhostNote(acrossReset), '');
-  assert.equal(runwayScene(acrossReset).ghostDepth, null);
+  assert.equal(runwayScene(acrossReset).ghost, null);
+});
+
+// The camera rides with the aircraft, so there is no room to draw a ghost
+// behind it. The ghost is always set down ahead: its distance is how much
+// changed since the last reading, its colour which way it went.
+test('the ghost aircraft is set down ahead, tinted by which way the burn moved', () => {
+  const at = (minutes) => new Date(Date.UTC(2099, 7, 12, 0, minutes)).toISOString();
+  const withHistory = (earlier, now) => runwayModel({
+    actualCum: now,
+    currentHour: 84,
+    remainingHours: 84,
+    projectedHoursToDepletion: 84,
+    usageHistory: [{ timestamp: at(0), usedPercent: earlier }, { timestamp: at(60), usedPercent: now }]
+  });
+
+  // Burning harder than before: the aircraft is ahead, so the ghost trails it.
+  const worse = runwayScene(runwayPhysics(withHistory(0.2, 0.7)));
+  assert.equal(worse.ghost.kind, 'previous');
+  assert.equal(worse.ghost.direction, 1);
+  assert.ok(worse.ghost.depth < 88, 'the ghost is always drawn ahead of the aircraft');
+
+  // Barely moved since: the aircraft has fallen behind its old pace.
+  const better = runwayScene(runwayPhysics(withHistory(0.68, 0.7)));
+  assert.equal(better.ghost.direction, -1);
+  assert.ok(better.ghost.depth < 88, 'the ghost is always drawn ahead of the aircraft');
+
+  // A bigger swing puts the ghost further off, and distance shrinks it.
+  assert.ok(worse.ghost.depth < better.ghost.depth, 'the larger change is drawn further away');
+  assert.ok(worse.ghost.scale < better.ghost.scale);
+});
+
+// A spent quota has no runway left to measure, only time.
+test('an exhausted quota shows the reset waiting down the runway', () => {
+  const scene = runwayScene(runwayPhysics(runwayModel({
+    actualCum: 1,
+    currentHour: 148,
+    remainingHours: 20,
+    totalHours: 168,
+    projectedHoursToDepletion: 0
+  })));
+  assert.equal(scene.ghost.kind, 'reset');
+  assert.equal(scene.ghost.direction, 0, 'the reset is not a better-or-worse comparison');
+  assert.equal(scene.ghost.approachSeconds, 20 * 3600, 'it closes over exactly the remaining wait');
+  assert.ok(scene.ghost.depth < 88, 'it waits ahead of the wreck');
+
+  // Nearer the reset, it waits closer.
+  const nearer = runwayScene(runwayPhysics(runwayModel({
+    actualCum: 1, currentHour: 166, remainingHours: 2, totalHours: 168, projectedHoursToDepletion: 0
+  })));
+  assert.ok(nearer.ghost.depth > scene.ghost.depth, 'a shorter wait draws the reset nearer');
+
+  const html = renderRunwayView([runwayModel({
+    id: 'spent', actualCum: 1, currentHour: 148, remainingHours: 20, totalHours: 168, projectedHoursToDepletion: 0
+  })]);
+  assert.match(html, /class="runway-ghost-plane runway-ghost-reset"/);
+  assert.match(html, /data-runway-approach="72000"/);
 });
 
 test('runway hud reports pace, rate direction, and margin as real numbers', () => {

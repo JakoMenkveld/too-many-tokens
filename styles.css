@@ -651,6 +651,7 @@ select:focus-visible {
 @property --runway-speed { syntax: '<number>'; inherits: true; initial-value: 1; }
 @property --runway-brake { syntax: '<number>'; inherits: true; initial-value: 0; }
 @property --runway-ghost { syntax: '<number>'; inherits: true; initial-value: 40; }
+@property --runway-ghost-scale { syntax: '<number>'; inherits: true; initial-value: 1; }
 
 .runway-panel .panel-heading > div:first-child {
 	min-width: 0;
@@ -715,6 +716,13 @@ select:focus-visible {
 	--runway-rush-period: 46px;
 	--runway-strip-height: 218px;
 	--runway-strip-top: 100px;
+	--runway-stop-depth: 88;
+	/* The ghost is tinted by which side of it the aircraft is on: rose when the
+	   aircraft is ahead of where it was, mint when it has fallen behind. The
+	   aircraft itself stays metal -- a red hero aircraft on a card whose badge
+	   reads "Ample runway" would argue with itself. */
+	--runway-ghost-hue: calc(158 - (var(--runway-ghost-dir, 0) + 1) / 2 * 152);
+	--runway-ghost-tint: hsl(var(--runway-ghost-hue) 70% 64%);
 	min-width: 0;
 	overflow: hidden;
 	border: 1px solid var(--border-soft);
@@ -924,17 +932,109 @@ select:focus-visible {
 	animation: runway-ground-rush calc(1.15s / var(--runway-speed)) linear infinite;
 }
 
-/* Where the gate sat at the previous reading. Recomputed from history, so it
-   is the same measurement one refresh ago rather than a remembered pixel. */
-.runway-ghost-line {
+/* Where the aircraft stood at the previous reading, drawn as an aircraft so the
+   comparison is spatial: if the real one is ahead of the ghost, ground has been
+   covered since -- the quota is going faster than it was. */
+.runway-ghost-plane {
 	position: absolute;
-	top: calc(var(--runway-ghost) * 1%);
-	right: 0;
-	left: 0;
-	height: 2px;
-	z-index: 3;
-	background: repeating-linear-gradient(90deg, rgba(206, 216, 236, 0.62) 0 6px, transparent 6px 12px);
-	opacity: 0.7;
+	top: calc(var(--runway-strip-top) + (var(--runway-ghost) / 100) * var(--runway-strip-height));
+	left: 50%;
+	z-index: 6;
+	width: 176px;
+	height: 132px;
+	opacity: 0.85;
+	transform: translate(-50%, -62%) scale(var(--runway-ghost-scale));
+	transform-origin: 50% 62%;
+	pointer-events: none;
+}
+
+/* Outline rather than fill, so an overlap still reads as two aircraft. */
+.runway-ghost-plane i {
+	position: absolute;
+	display: block;
+	border: 1.5px solid var(--runway-ghost-tint);
+	background: color-mix(in srgb, var(--runway-ghost-tint) 14%, transparent);
+}
+
+.ghost-fuselage {
+	top: 4px;
+	left: 50%;
+	width: 19px;
+	height: 122px;
+	z-index: 2;
+	border-radius: 52% 52% 30% 30%;
+	transform: translateX(-50%);
+}
+
+.ghost-wing {
+	top: 54px;
+	width: 72px;
+	height: 31px;
+}
+
+.ghost-wing-left {
+	right: calc(50% + 6px);
+	clip-path: polygon(100% 8%, 100% 72%, 4% 100%, 22% 67%);
+}
+
+.ghost-wing-right {
+	left: calc(50% + 6px);
+	clip-path: polygon(0 8%, 78% 67%, 96% 100%, 0 72%);
+}
+
+.ghost-tailplane {
+	top: 100px;
+	width: 40px;
+	height: 18px;
+}
+
+.ghost-tailplane-left {
+	right: calc(50% + 4px);
+	clip-path: polygon(100% 0, 100% 75%, 5% 100%, 29% 45%);
+}
+
+.ghost-tailplane-right {
+	left: calc(50% + 4px);
+	clip-path: polygon(0 0, 71% 45%, 95% 100%, 0 75%);
+}
+
+/* The tether spans exactly the gap between the two, so the distance is the
+   reading and the colour says which way it went. */
+.runway-ghost-link {
+	position: absolute;
+	top: calc(var(--runway-strip-top) + (min(var(--runway-ghost), var(--runway-stop-depth)) / 100) * var(--runway-strip-height));
+	left: 50%;
+	width: 2px;
+	height: calc(((max(var(--runway-ghost), var(--runway-stop-depth)) - min(var(--runway-ghost), var(--runway-stop-depth))) / 100) * var(--runway-strip-height));
+	z-index: 2;
+	opacity: 0.8;
+	background: repeating-linear-gradient(180deg, var(--runway-ghost-tint) 0 5px, transparent 5px 11px);
+	transform: translateX(-50%);
+	pointer-events: none;
+}
+
+/* Once the quota is spent the ghost stops being the previous reading and
+   becomes the reset, waiting down the runway at a distance set by how long is
+   left. Cool blue and a halo, because it is a different quantity from the
+   rose/mint delta ghost and must not be read as one.
+
+   The crawl is a one-shot on purpose: its duration is the remaining wait and
+   its start is recomputed on every render, so restarting it re-syncs it to the
+   clock instead of drifting. */
+.runway-ghost-reset {
+	--runway-ghost-tint: #74c7ea;
+}
+
+.runway-ghost-plane.runway-ghost-reset {
+	opacity: 0.5;
+	animation: runway-reset-approach calc(var(--runway-approach, 0) * 1s) linear forwards;
+}
+
+@keyframes runway-reset-approach {
+	to {
+		top: calc(var(--runway-strip-top) + (var(--runway-stop-depth) / 100) * var(--runway-strip-height));
+		transform: translate(-50%, -62%) scale(1);
+	}
 }
 
 .runway-end {
