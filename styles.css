@@ -645,7 +645,8 @@ select:focus-visible {
    gate between two correct resting states instead of replaying a cinematic. */
 @property --runway-severity { syntax: '<number>'; inherits: true; initial-value: 0; }
 @property --runway-speed { syntax: '<number>'; inherits: true; initial-value: 1; }
-@property --runway-dry { syntax: '<number>'; inherits: true; initial-value: 520; }
+@property --runway-plane { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --runway-flag { syntax: '<number>'; inherits: true; initial-value: 560; }
 @property --runway-approach { syntax: '<number>'; inherits: true; initial-value: 0; }
 @property --runway-approach-dx { syntax: '<number>'; inherits: true; initial-value: 0; }
 
@@ -690,11 +691,11 @@ select:focus-visible {
 	background: linear-gradient(90deg, hsl(158 72% 66%), hsl(82 72% 62%), hsl(6 72% 66%));
 }
 
-.runway-target-key {
-	width: 9px;
-	height: 9px;
-	border: 1.5px dashed rgba(206, 216, 236, 0.7);
-	border-radius: 50%;
+.runway-ghostjet-key {
+	width: 16px;
+	height: 7px;
+	border: 1.5px solid rgba(142, 160, 184, 0.7);
+	border-radius: 999px;
 	background: transparent;
 }
 
@@ -720,7 +721,7 @@ select:focus-visible {
 	border: 1px solid var(--border-soft);
 	border-radius: 14px;
 	background: rgba(8, 11, 19, 0.34);
-	transition: --runway-dry 900ms cubic-bezier(0.22, 0.68, 0.24, 1);
+	transition: --runway-plane 900ms cubic-bezier(0.22, 0.68, 0.24, 1), --runway-flag 900ms cubic-bezier(0.22, 0.68, 0.24, 1);
 }
 
 /* No measurable rate is not a safe landing, so it gets no verdict colour. */
@@ -820,7 +821,7 @@ select:focus-visible {
 .rw-star { fill: #8ea4c4; opacity: 0.5; }
 .rw-earth { fill: #0a0e16; }
 .rw-asphalt { fill: #242b38; }
-.rw-beyond { fill: #121926; }
+.rw-beyond { fill: #0d1119; }
 
 .rw-flow rect { fill: rgba(240, 245, 255, 0.5); }
 .rw-flow circle { fill: color-mix(in srgb, var(--runway-tint) 70%, #eef4ff); }
@@ -841,23 +842,43 @@ select:focus-visible {
 .rw-zone-spare { fill: rgba(114, 223, 189, 0.16); }
 .rw-zone-short { fill: rgba(240, 113, 140, 0.18); }
 
-/* The dry gate is the measurement, so it is the element that slides between
-   readings: settleRunwayCards() transitions --runway-dry on the card. */
-.rw-dry {
-	transform: translateX(calc(var(--runway-dry) * 1px));
+/* The aircraft and the reset post are the two measurements, so they are the
+   elements that slide between readings: settleRunwayCards() transitions
+   --runway-plane and --runway-flag on the card. */
+.rw-plane {
+	transform: translateX(calc(var(--runway-plane) * 1px));
 	will-change: transform;
 }
 
-.rw-dry line {
-	stroke: var(--runway-tint);
-	stroke-width: 2;
-	stroke-dasharray: none;
+.rw-reset {
+	transform: translateX(calc(var(--runway-flag) * 1px));
+	will-change: transform;
 }
 
-.rw-dry-light {
-	fill: var(--runway-tint);
-	filter: drop-shadow(0 0 6px var(--runway-tint));
+/* The hollow even-pace twin of the aircraft. */
+.rw-ghost-jet path,
+.rw-ghost-jet ellipse,
+.rw-ghost-jet circle,
+.rw-ghost-jet line {
+	fill: rgba(142, 160, 184, 0.08);
+	stroke: rgba(142, 160, 184, 0.55);
+	stroke-width: 1;
 }
+
+/* Solid you to hollow you: ahead of your ghost means burning too fast. */
+.rw-pace-line {
+	stroke-width: 1.5;
+	stroke-dasharray: 3 5;
+	opacity: 0.8;
+}
+
+.rw-pace-hot { stroke: #f0718c; }
+.rw-pace-cool { stroke: #72dfbd; }
+
+/* The end of the quota. Leans when the aircraft has crashed into it. */
+.rw-wall-a { fill: #eef1f6; }
+.rw-wall-b { fill: #ef5a70; }
+.rw-wall { filter: drop-shadow(0 0 5px rgba(239, 90, 112, 0.55)); }
 
 .rw-label {
 	fill: #8ea0b8;
@@ -872,24 +893,7 @@ select:focus-visible {
 
 .rw-reset-post { fill: #cdd6e4; }
 
-/* At an even burn the dry gate lands exactly on the reset threshold, so the
-   threshold doubles as the even-pace target: a ring at gate height, and a
-   dashed comparator spanning the gap between the gate and where it should be. */
-.rw-target-ring {
-	fill: none;
-	stroke: rgba(206, 216, 236, 0.55);
-	stroke-width: 1.3;
-	stroke-dasharray: 2.5 3;
-}
 
-.rw-margin-line {
-	stroke-width: 1.5;
-	stroke-dasharray: 3 5;
-	opacity: 0.75;
-}
-
-.rw-margin-spare { stroke: #72dfbd; }
-.rw-margin-short { stroke: #f0718c; }
 .rw-check-a { fill: #e8ecf3; }
 .rw-check-b { fill: #39404d; }
 

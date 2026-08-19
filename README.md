@@ -108,7 +108,7 @@ The extension only asks Chrome for access to those specific sites — not to eve
 
 ## Features
 
-- Dark responsive dashboard with remembered bar, graph, and runway views of actual-versus-ideal quota pace and projected time to depletion, grouped by provider. The runway view is a night-scene side view drawn on one time axis: the aircraft rolls toward the reset at the end of the runway, and a lit gate marks where the quota runs dry — past the end of the runway is spare. Gate position, ground speed, and colour all come off measured numbers, a marker shows the previous reading for comparison, and a spent quota parks the aircraft while the reset threshold closes in over exactly the remaining wait.
+- Dark responsive dashboard with remembered bar, graph, and runway views of actual-versus-ideal quota pace and projected time to depletion, grouped by provider. The runway view is a night-scene side view where the runway is the quota itself: your aircraft stands at how much is burned, a hollow ghost aircraft at where even pace would be, the runway ends at the wall where the quota runs dry, and a checkered post marks where the reset is projected to catch you — past the wall means running dry first. Positions, ground speed, and colour all come off measured numbers, a marker shows the previous projection, and a spent quota is drawn crashed into the wall while the reset post crawls back to it over exactly the remaining wait.
 - Two focused pages: Overview for actual-versus-ideal pace, and Setup for provider connections, tracker visibility, and manual overrides.
 - Multi-metric extraction: one Claude page can produce separate **Current session**, **All models**, and model-specific weekly limits.
 - Percent-based and token-based run-rate calculations.

@@ -1166,13 +1166,12 @@ function renderPaceGraphs(models) {
 const RUNWAY_VIEW = Object.freeze({
 	width: 720,
 	height: 200,
-	// Nose of the aircraft. The axis starts here: this is "now".
-	planeX: 150,
-	// The runway ends at the reset, at the same x on every live card, so two
-	// cards side by side compare by eye.
-	resetX: 520,
-	// The dry gate never sits inside the airframe or off the right edge.
-	minX: 172,
+	// 0% of the quota. The aircraft's nose stands at its used fraction.
+	startX: 150,
+	// 100% of the quota: the wall the aircraft must not reach before reset.
+	// Fixed at the same x on every card, so cards compare by eye.
+	wallX: 560,
+	// Nothing is drawn off the right edge of the scene.
 	maxX: 700
 });
 // How much surplus (margin - 1) counts as fully ample, and how much shortfall
@@ -1183,7 +1182,7 @@ const RUNWAY_MIN_GHOST_GAP_MS = 60_000;
 // Every scene value the card publishes, and the subset that is applied once
 // rather than transitioned between readings. Only the dry gate moves on a
 // refresh; everything else is positioned by plain SVG attributes.
-const RUNWAY_SCENE_PROPERTIES = Object.freeze(['severity', 'speed', 'dry', 'approach', 'approach-dx']);
+const RUNWAY_SCENE_PROPERTIES = Object.freeze(['severity', 'speed', 'plane', 'flag', 'approach', 'approach-dx']);
 const RUNWAY_STATIC_PROPERTIES = Object.freeze(['severity', 'speed', 'approach', 'approach-dx']);
 // Last settled gate position per tracker, so a re-render can slide from where
 // the scene already was instead of snapping. Keyed by tracker id.
@@ -1287,7 +1286,8 @@ function runwayGhost(model, timing) {
 	return {
 		margin: rollHours / remainingHours,
 		marginHours: rollHours - remainingHours,
-		elapsedHours
+		elapsedHours,
+		usedThen: previous.used
 	};
 }
 
@@ -1296,6 +1296,8 @@ function runwayPhysics(model) {
 	const ideal = clamp(Number(model?.flatCum) || 0, 0, 1);
 	const paceDelta = timing.actual - ideal;
 	const shared = {
+		used: timing.actual,
+		ideal,
 		paceDelta,
 		speed: runwayApproachSpeed(paceDelta),
 		brake: runwayBrake(model),
@@ -1365,61 +1367,66 @@ function runwayDetail(state, marginHours) {
 	return `The quota runs dry ${span} before the reset, well short of it.`;
 }
 
-// Screen geometry, kept apart from the physics so the mapping from a margin to
-// a picture is one readable function rather than arithmetic sprinkled through
-// the template. Margin 1 lands the dry gate exactly on the reset threshold.
-function runwayX(margin) {
-	const view = RUNWAY_VIEW;
-	if (margin <= 1) return Math.max(view.minX, view.planeX + (view.resetX - view.planeX) * margin);
-	// Beyond the end of the runway the axis compresses asymptotically, so spare
-	// keeps reading as more spare without ever leaving the card, and two ample
-	// cards still differ on screen instead of pinning to the same edge.
-	const surplus = margin - 1;
-	return view.resetX + (view.maxX - view.resetX) * (surplus / (surplus + 1));
-}
+// Screen geometry, kept apart from the physics. The axis is quota burned: the
+// aircraft stands at how much has been used, the hollow ghost at how much even
+// pace would have used, the runway ends at the wall where the quota runs dry,
+// and the checkered post stands where the reset is projected to catch the
+// aircraft. Flag on the wall is margin 1 exactly -- running dry at the moment
+// of reset -- so past the wall means running dry first.
+const RUNWAY_NOSE_BASE = 155.5; // the jet sprite's untranslated nose x
 
 function runwayScene(physics) {
 	const view = RUNWAY_VIEW;
+	const span = view.wallX - view.startX;
+	const used = physics.state === 'exhausted' ? 1 : clamp(physics.used, 0, 1);
+	// Nose against the wall at 100%: the aircraft rolled until the quota died
+	// there, so the two touch.
+	const planeDx = view.startX + span * used - RUNWAY_NOSE_BASE;
 
-	// Once the quota is gone there is no roll left to project, only the wait.
-	// The reset stands on the runway at a distance set by how long is left and
-	// closes on the parked aircraft in real time, so the card counts down by
-	// geometry. Its crawl duration is recomputed on every render, which
-	// re-syncs it to the clock instead of drifting.
+	// Once the quota is gone only the wait is left. The reset post stands in
+	// the overrun ground past the wall, at a distance set by how long remains,
+	// and crawls back to the wreck in real time. Its crawl duration is
+	// recomputed on every render, which re-syncs it to the clock.
 	if (physics.state === 'exhausted' && physics.runwayHours > 0 && physics.cycleHours > 0) {
 		const waiting = clamp(physics.runwayHours / physics.cycleHours, 0, 1);
-		const resetX = clamp(view.planeX + (view.maxX - view.planeX) * waiting, view.planeX + 34, view.maxX - 10);
+		const flagX = clamp(view.wallX + 6 + (view.maxX - view.wallX - 6) * waiting, view.wallX + 12, view.maxX);
 		return {
-			// Nose against the gate: the aircraft rolled until the quota died
-			// there, so the two touch.
-			dryX: view.planeX + 6,
-			resetX,
-			ghost: null,
+			planeDx,
+			ghostDx: null,
+			flagX,
+			prev: null,
 			approach: {
 				seconds: Math.round(clamp(physics.runwayHours, 0, 24 * 14) * 3600),
-				dx: Math.max(0, resetX - (view.planeX + 24))
+				dx: Math.max(0, flagX - (view.wallX + 4))
 			}
 		};
 	}
 
-	const dryX = physics.margin === null ? null : runwayX(physics.margin);
-	if (!physics.ghost || physics.marginHours === null || dryX === null) {
-		return { dryX, resetX: view.resetX, ghost: null, approach: null };
+	const ghostDx = view.startX + span * clamp(physics.ideal, 0, 1) - RUNWAY_NOSE_BASE;
+
+	// Projected quota used by the time the reset lands. Margin 1 puts it at
+	// exactly 1 -- the wall -- whatever the current usage is.
+	const flagX = physics.margin === null || physics.margin <= 0
+		? null
+		: clamp(
+			view.startX + span * (used + (1 - used) / physics.margin),
+			view.startX + span * used + 24,
+			view.maxX
+		);
+
+	// The triangle marks where the flag stood at the previous reading, so a
+	// drifting projection is visible as the flag walking away from it.
+	let prev = null;
+	if (physics.ghost && physics.marginHours !== null && flagX !== null && physics.ghost.margin > 0) {
+		const prevUsed = clamp(physics.ghost.usedThen, 0, 1);
+		const change = physics.marginHours - physics.ghost.marginHours;
+		prev = {
+			x: clamp(view.startX + span * (prevUsed + (1 - prevUsed) / physics.ghost.margin), view.startX, view.maxX),
+			direction: Math.abs(change) * 60 < 6 ? 0 : change < 0 ? 1 : -1
+		};
 	}
 
-	// The ghost gate is the same measurement one reading ago, on the same axis,
-	// so which side it lands on is the whole comparison: right of the live gate
-	// means the quota was going to last longer than it does now.
-	const change = physics.marginHours - physics.ghost.marginHours;
-	return {
-		dryX,
-		resetX: view.resetX,
-		ghost: {
-			x: runwayX(physics.ghost.margin),
-			direction: Math.abs(change) * 60 < 6 ? 0 : change < 0 ? 1 : -1
-		},
-		approach: null
-	};
+	return { planeDx, ghostDx, flagX, prev, approach: null };
 }
 
 function runwayGhostNote(physics) {
@@ -1460,16 +1467,17 @@ function runwayOutcome(model) {
 	};
 }
 
-// One aircraft, drawn in profile facing its direction of travel. The wing and
-// engine are on the near side, so they paint over the fuselage; gear and fin
-// paint under it. The dead variant greys out and smoulders.
-function runwayJetMarkup(state) {
+// One aircraft in profile, facing its direction of travel. The near-side wing
+// and engine paint over the fuselage; gear and fin paint under it. The ghost
+// variant is the same airframe hollowed out; the dead variant greys and
+// smoulders.
+function runwayJetMarkup(state, ghost = false) {
 	const dead = state === 'exhausted';
 	return `
-					<g class="rw-jet${dead ? ' rw-jet-dead' : ''}"${dead ? ' transform="rotate(-2.5 154 140)"' : ''} aria-hidden="true">
-						<ellipse class="rw-jet-shadow" cx="106" cy="141.5" rx="52" ry="3.6"></ellipse>
-						<path class="rw-jet-fin" d="M80 114 L62 86 L74 86 L94 114 Z"></path>
-						<circle class="rw-beacon" cx="64" cy="84.5" r="2.2"></circle>
+					<g class="${ghost ? 'rw-ghost-jet' : `rw-jet${dead ? ' rw-jet-dead' : ''}`}"${dead ? ' transform="rotate(-2.5 154 140)"' : ''} aria-hidden="true">${ghost ? '' : `
+						<ellipse class="rw-jet-shadow" cx="106" cy="141.5" rx="52" ry="3.6"></ellipse>`}
+						<path class="rw-jet-fin" d="M80 114 L62 86 L74 86 L94 114 Z"></path>${ghost ? '' : `
+						<circle class="rw-beacon" cx="64" cy="84.5" r="2.2"></circle>`}
 						<path class="rw-jet-tail" d="M72 117 L54 124 L72 124 Z"></path>
 						<line class="rw-jet-strut" x1="104" y1="128" x2="104" y2="136"></line>
 						<line class="rw-jet-strut" x1="138" y1="128" x2="138" y2="136"></line>
@@ -1481,7 +1489,7 @@ function runwayJetMarkup(state) {
 						<path class="rw-jet-cockpit" d="M133 114.4 L143 114.2 Q148.5 116.5 149.5 119.6 L133 119.8 Z"></path>
 						<path class="rw-jet-wing" d="M101 121 L80 136 L97 136 L119 121 Z"></path>
 						<ellipse class="rw-jet-engine" cx="90" cy="133" rx="8.6" ry="4.6"></ellipse>
-						<circle class="rw-jet-intake" cx="82.6" cy="133" r="3.4"></circle>${dead ? `
+						<circle class="rw-jet-intake" cx="82.6" cy="133" r="3.4"></circle>${dead && !ghost ? `
 						<ellipse class="rw-ember" cx="95" cy="130" rx="13" ry="5"></ellipse>
 						<circle class="rw-smoke" cx="96" cy="116" r="4"></circle>
 						<circle class="rw-smoke" cx="102" cy="112" r="5.4"></circle>
@@ -1495,6 +1503,24 @@ function renderRunwayView(models) {
 	const view = RUNWAY_VIEW;
 	const stars = [[64, 26], [180, 52], [318, 18], [472, 44], [608, 30], [676, 68]]
 		.map(([x, y]) => `<circle class="rw-star" cx="${x}" cy="${y}" r="1.1"></circle>`).join('');
+
+	// Ground markings loop with a 48px period; they stop short of the wall.
+	const flow = [];
+	for (let x = -48; x + 22 <= view.wallX - 16; x += 48) {
+		flow.push(`<rect x="${x}" y="154" width="22" height="3" rx="1.5"></rect>`);
+		flow.push(`<circle cx="${x + 11}" cy="142.5" r="1.8"></circle>`);
+		flow.push(`<circle cx="${x + 11}" cy="169.5" r="1.8"></circle>`);
+	}
+
+	// The wall: the end of the quota, and the flag's even-pace target. When the
+	// aircraft has hit it, it leans.
+	const wallMarkup = (state) => `<g class="rw-wall"${state === 'exhausted' ? ` transform="rotate(6 ${view.wallX} 140)"` : ''}>
+						<rect class="rw-wall-a" x="${view.wallX - 3}" y="100" width="6" height="10"></rect>
+						<rect class="rw-wall-b" x="${view.wallX - 3}" y="110" width="6" height="10"></rect>
+						<rect class="rw-wall-a" x="${view.wallX - 3}" y="120" width="6" height="10"></rect>
+						<rect class="rw-wall-b" x="${view.wallX - 3}" y="130" width="6" height="10"></rect>
+					</g>`;
+
 	const cards = ordered.map((model) => {
 		const physics = runwayPhysics(model);
 		const scene = runwayScene(physics);
@@ -1514,75 +1540,63 @@ function renderRunwayView(models) {
 			: physics.rollHours <= 0 ? 'quota dry' : `${formatDurationHours(physics.rollHours)} to dry`;
 		const sceneLabel = `${trackerDisplayLabel(model)}: ${physics.status}. ${physics.detail}${ghostNote ? ` ${ghostNote}` : ''} Pace ${hud.pace} against ideal, burn rate ${hud.rate.toLowerCase()}.`;
 
-		// Ground markings loop with a 48px period; they stop short of the
-		// threshold so the moving region never slides under the reset post.
-		const flow = [];
-		for (let x = -48; x + 22 <= scene.resetX - 16; x += 48) {
-			flow.push(`<rect x="${x}" y="154" width="22" height="3" rx="1.5"></rect>`);
-			flow.push(`<circle cx="${x + 11}" cy="142.5" r="1.8"></circle>`);
-			flow.push(`<circle cx="${x + 11}" cy="169.5" r="1.8"></circle>`);
-		}
+		// Between the flag and the wall: quota to spare at reset, or the
+		// stretch past the end the burn would need. During a countdown the
+		// sliding post carries that story instead.
+		const zone = scene.approach || scene.flagX === null || Math.abs(scene.flagX - view.wallX) < 4 ? '' : scene.flagX <= view.wallX
+			? `<rect class="rw-zone rw-zone-spare" x="${scene.flagX.toFixed(1)}" y="146" width="${(view.wallX - scene.flagX).toFixed(1)}" height="20" rx="3"></rect>`
+			: `<rect class="rw-zone rw-zone-short" x="${view.wallX.toFixed(1)}" y="146" width="${(scene.flagX - view.wallX).toFixed(1)}" height="20" rx="3"></rect>`;
 
-		// Between the dry gate and the reset: spare quota past the end of the
-		// runway, or the stretch you would be stranded on. During a countdown
-		// the sliding reset post carries that story instead.
-		const zone = scene.approach || scene.dryX === null ? '' : scene.dryX >= scene.resetX
-			? `<rect class="rw-zone rw-zone-spare" x="${scene.resetX.toFixed(1)}" y="146" width="${(scene.dryX - scene.resetX).toFixed(1)}" height="20" rx="3"></rect>`
-			: `<rect class="rw-zone rw-zone-short" x="${scene.dryX.toFixed(1)}" y="146" width="${(scene.resetX - scene.dryX).toFixed(1)}" height="20" rx="3"></rect>`;
-
-		// The label offset keeps text on-card when the gate is near either edge.
-		const labelDx = scene.dryX === null ? 0 : scene.dryX > 640 ? 640 - scene.dryX : scene.dryX < 210 ? 210 - scene.dryX : 0;
-		const dryGroup = scene.dryX === null
-			? `<text class="rw-label rw-note" x="330" y="112" text-anchor="middle">no rate yet</text>`
-			: `<g class="rw-dry">
-						<g${physics.state === 'exhausted' ? ' class="rw-dry-hit" transform="rotate(9 0 140)"' : ''}>
-							<line x1="0" y1="96" x2="0" y2="140"></line>
-							<circle class="rw-dry-light" cx="0" cy="90" r="4.5"></circle>
-						</g>
-						<text class="rw-label rw-dry-label" x="${labelDx}" y="76" text-anchor="middle">${escapeHtml(gateLabel)}</text>
-					</g>`;
-
-		// The threshold's slider is a separate inner group because a CSS
-		// transform would override the outer group's positioning attribute.
-		const marginLine = scene.approach || scene.dryX === null ? '' : (() => {
-			const left = Math.min(scene.dryX, scene.resetX) + 9;
-			const right = Math.max(scene.dryX, scene.resetX) - 9;
-			if (right - left < 6) return '';
-			const tone = scene.dryX >= scene.resetX ? 'spare' : 'short';
-			return `<line class="rw-margin-line rw-margin-${tone}" x1="${left.toFixed(1)}" y1="90" x2="${right.toFixed(1)}" y2="90"></line>`;
+		// Solid you versus hollow even-pace you, tied by a dashed line at
+		// fuselage height: ahead of your ghost means burning too fast.
+		const noseX = scene.planeDx + RUNWAY_NOSE_BASE;
+		// Within half a fuselage the ghost sits inside the airframe and reads as a
+		// double exposure saying nothing the solid aircraft does not, so both it
+		// and the tie-line only appear once there is a gap worth reading.
+		const ghostVisible = scene.ghostDx !== null && Math.abs(scene.planeDx - scene.ghostDx) >= 14;
+		const ghostNoseX = ghostVisible ? scene.ghostDx + RUNWAY_NOSE_BASE : null;
+		const paceLine = ghostNoseX === null ? '' : (() => {
+			const tone = noseX > ghostNoseX ? 'hot' : 'cool';
+			const left = Math.min(noseX, ghostNoseX) + 4;
+			const right = Math.max(noseX, ghostNoseX) - 4;
+			return `<line class="rw-pace-line rw-pace-${tone}" x1="${left.toFixed(1)}" y1="106" x2="${right.toFixed(1)}" y2="106"></line>`;
 		})();
 
-		const resetGroup = `<g class="rw-reset" transform="translate(${scene.resetX.toFixed(1)} 0)">
+		const flagGroup = scene.flagX === null ? '' : `<g class="rw-reset">
 						<g class="rw-reset-slider${scene.approach ? ' rw-reset-approach' : ''}">
-							<circle class="rw-target-ring" cx="0" cy="90" r="7.5"></circle>
 							<rect class="rw-check-a" x="-12" y="140" width="8" height="7"></rect>
 							<rect class="rw-check-b" x="-4" y="140" width="8" height="7"></rect>
 							<rect class="rw-check-a" x="4" y="140" width="8" height="7"></rect>
 							<rect class="rw-reset-post" x="-2" y="98" width="4" height="42" rx="1"></rect>
-							<circle class="rw-reset-light" cx="0" cy="90" r="4"></circle>
+							<circle class="rw-reset-light" cx="0" cy="93" r="4"></circle>
 							<text class="rw-label rw-reset-label" x="0" y="190" text-anchor="middle">${escapeHtml(reset ? `reset in ${formatCountdown(reset)}` : 'reset pending')}</text>
 						</g>
 					</g>`;
 
-		const ghostGroup = scene.ghost ? `<g class="rw-ghost ${scene.ghost.direction > 0 ? 'rw-ghost-worse' : scene.ghost.direction < 0 ? 'rw-ghost-better' : 'rw-ghost-level'}" transform="translate(${scene.ghost.x.toFixed(1)} 0)">
+		// The time-to-dry reading belongs to the wall, since the wall is where
+		// the quota dies. Its label offset keeps the text on the card.
+		const wallLabel = `<text class="rw-label rw-dry-label" x="${view.wallX}" y="80" text-anchor="middle">${escapeHtml(gateLabel)}</text>`;
+
+		const prevMarker = scene.prev ? `<g class="rw-ghost ${scene.prev.direction > 0 ? 'rw-ghost-worse' : scene.prev.direction < 0 ? 'rw-ghost-better' : 'rw-ghost-level'}" transform="translate(${scene.prev.x.toFixed(1)} 0)">
 						<line x1="0" y1="114" x2="0" y2="140"></line>
 						<path d="M0 106 L5 114 L-5 114 Z"></path>
 					</g>` : '';
 
-		// The scene's two animated numbers travel as data attributes and are
-		// applied by settleRunwayCards() through CSSOM, never a style attribute:
-		// serve.js sends style-src 'self' with no 'unsafe-inline', so the
-		// browser drops style attributes outright. All static geometry is plain
-		// SVG attributes, which CSP does not govern.
+		// The animated values travel as data attributes and are applied by
+		// settleRunwayCards() through CSSOM, never a style attribute: serve.js
+		// sends style-src 'self' with no 'unsafe-inline', so the browser drops
+		// style attributes outright. Static geometry is plain SVG attributes,
+		// which CSP does not govern.
 		const previous = runwaySettled.get(String(model.id ?? ''));
 		return `
 			<article class="runway-card runway-${physics.state}"
 				data-runway-id="${escapeHtml(String(model.id ?? ''))}"
 				data-runway-severity="${physics.severity.toFixed(3)}"
 				data-runway-speed="${physics.speed.toFixed(3)}"
-				data-runway-dry="${(scene.dryX ?? view.planeX).toFixed(2)}"
+				data-runway-plane="${scene.planeDx.toFixed(2)}"
+				data-runway-flag="${(scene.flagX ?? view.wallX).toFixed(2)}"
 				data-runway-approach="${scene.approach ? scene.approach.seconds : 0}"
-				data-runway-approach-dx="${scene.approach ? scene.approach.dx.toFixed(1) : 0}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.dry.toFixed(2)}"` : ''}>
+				data-runway-approach-dx="${scene.approach ? scene.approach.dx.toFixed(1) : 0}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.plane.toFixed(2)},${previous.flag.toFixed(2)}"` : ''}>
 				<header class="runway-card-header">
 					<div><strong>${escapeHtml(trackerDisplayLabel(model))}</strong><span>${escapeHtml(cycleLabel(model))} · ${formatPercent(actual)} used</span></div>
 					<span class="runway-outcome"><i></i>${escapeHtml(physics.status)}</span>
@@ -1592,15 +1606,17 @@ function renderRunwayView(models) {
 					<rect class="rw-sky" x="0" y="0" width="${view.width}" height="140"></rect>
 					${stars}
 					<rect class="rw-earth" x="0" y="140" width="${view.width}" height="60"></rect>
-					<rect class="rw-beyond" x="${scene.resetX.toFixed(1)}" y="140" width="${(view.width - scene.resetX).toFixed(1)}" height="32"></rect>
-					<rect class="rw-asphalt" x="0" y="140" width="${scene.resetX.toFixed(1)}" height="32"></rect>
+					<rect class="rw-beyond" x="${view.wallX}" y="140" width="${view.width - view.wallX}" height="32"></rect>
+					<rect class="rw-asphalt" x="0" y="140" width="${view.wallX}" height="32"></rect>
 					<g class="rw-flow" aria-hidden="true">${flow.join('')}</g>
 					${zone}
-					${marginLine}
-					${resetGroup}
-					${ghostGroup}
-					${dryGroup}
-					${runwayJetMarkup(physics.state)}
+					${wallMarkup(physics.state)}
+					${wallLabel}
+					${prevMarker}
+					${flagGroup}
+					${ghostVisible ? `<g class="rw-ghost-pos" transform="translate(${scene.ghostDx.toFixed(1)} 0)">${runwayJetMarkup(physics.state, true)}</g>` : ''}
+					${paceLine}
+					<g class="rw-plane">${runwayJetMarkup(physics.state)}</g>
 				</svg>
 				<footer class="runway-card-footer">
 					<p>${escapeHtml(physics.detail)}${ghostNote ? ` <em>${escapeHtml(ghostNote)}</em>` : ''}</p>
@@ -1612,21 +1628,21 @@ function renderRunwayView(models) {
 	return `
 		<article class="panel chart-panel runway-panel">
 			<div class="panel-heading">
-				<div><h2>Quota Runway</h2><p class="runway-intro">The aircraft rolls toward the reset at the end of the runway. The lit gate is where the quota runs dry — past the end of the runway is spare.</p></div>
-				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-target-key"></i>Even-pace target</span><span><i class="runway-ghost-key"></i>Previous reading</span></div></div>
+				<div><h2>Quota Runway</h2><p class="runway-intro">You are the solid aircraft; the hollow one is even pace. The runway ends where the quota runs dry, and the checkered post is where the reset catches you — past the end of the runway means running dry first.</p></div>
+				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-ghostjet-key"></i>Even-pace ghost</span><span><i class="runway-ghost-key"></i>Previous projection</span></div></div>
 			</div>
 			<div class="runway-grid-layout">${cards}</div>
 		</article>
 	`;
 }
 
-// Applies each scene's numbers, and slides the dry gate from where it last
-// settled to where the new reading puts it. Writing through CSSOM rather than
-// a style attribute is what keeps this working under the page's own
-// Content-Security-Policy -- see renderRunwayView().
+// Applies each scene's numbers, and slides the aircraft and the reset post
+// from where they last settled to where the new reading puts them. Writing
+// through CSSOM rather than a style attribute is what keeps this working under
+// the page's own Content-Security-Policy -- see renderRunwayView().
 function settleRunwayCards(root) {
 	if (!root || typeof root.querySelectorAll !== 'function') return;
-	root.querySelectorAll('.runway-card[data-runway-dry]').forEach((card) => {
+	root.querySelectorAll('.runway-card[data-runway-plane]').forEach((card) => {
 		const scene = {};
 		for (const name of RUNWAY_SCENE_PROPERTIES) {
 			const value = Number(card.getAttribute(`data-runway-${name}`));
@@ -1634,17 +1650,20 @@ function settleRunwayCards(root) {
 			scene[name] = value;
 		}
 		RUNWAY_STATIC_PROPERTIES.forEach((name) => card.style.setProperty(`--runway-${name}`, String(scene[name])));
-		runwaySettled.set(card.getAttribute('data-runway-id') || '', { dry: scene.dry });
+		runwaySettled.set(card.getAttribute('data-runway-id') || '', { plane: scene.plane, flag: scene.flag });
 
-		const from = Number(card.getAttribute('data-runway-from'));
-		const moving = Number.isFinite(from)
-			&& Math.abs(from - scene.dry) >= 0.01
+		const from = (card.getAttribute('data-runway-from') || '').split(',').map(Number);
+		const moving = from.length === 2
+			&& from.every(Number.isFinite)
+			&& (Math.abs(from[0] - scene.plane) >= 0.01 || Math.abs(from[1] - scene.flag) >= 0.01)
 			&& typeof requestAnimationFrame === 'function';
-		card.style.setProperty('--runway-dry', (moving ? from : scene.dry).toFixed(2));
+		card.style.setProperty('--runway-plane', (moving ? from[0] : scene.plane).toFixed(2));
+		card.style.setProperty('--runway-flag', (moving ? from[1] : scene.flag).toFixed(2));
 		if (!moving) return;
 		void card.offsetWidth;
 		requestAnimationFrame(() => {
-			card.style.setProperty('--runway-dry', scene.dry.toFixed(2));
+			card.style.setProperty('--runway-plane', scene.plane.toFixed(2));
+			card.style.setProperty('--runway-flag', scene.flag.toFixed(2));
 		});
 	});
 }
