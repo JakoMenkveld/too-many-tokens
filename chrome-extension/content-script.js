@@ -1,5 +1,9 @@
 'use strict';
 
+const trackerLog = globalThis.TrackerLog
+  || (typeof require === 'function' ? require('./log.js') : null);
+const log = trackerLog.createLogger('content');
+
 const BRIDGE_CHANNEL = 'llm-run-rate-tracker';
 const REQUEST_TYPES = {
   EXTENSION_LIST_TABS: 'LIST_TABS',
@@ -19,6 +23,8 @@ function postBridgeResponse(win, requestType, requestId, payload) {
 function sendRuntimeMessage(chromeApi, message) {
   return new Promise((resolve) => {
     if (!chromeApi?.runtime?.sendMessage) {
+      // Orphaned content script: the extension was reloaded underneath this page.
+      log.error('Extension context is gone -- this page needs reloading');
       resolve({ ok: false, error: 'Extension context unavailable. Reload the tracker page.' });
       return;
     }
@@ -27,6 +33,7 @@ function sendRuntimeMessage(chromeApi, message) {
       chromeApi.runtime.sendMessage(message, (response) => {
         const lastError = chromeApi.runtime.lastError;
         if (lastError) {
+          log.error(`Service worker did not answer ${message?.type}`, lastError.message);
           resolve({
             ok: false,
             error: lastError.message || 'The extension service worker did not respond.'
@@ -58,10 +65,12 @@ async function handleWindowMessage(event, win = globalThis.window, chromeApi = g
     return false;
   }
 
+  log.debug(`Forwarding ${message.type} to the service worker`, { requestId: message.requestId });
   const response = await sendRuntimeMessage(chromeApi, {
     type: REQUEST_TYPES[message.type],
     details: message.details || {}
   });
+  log.debug(`Answering ${message.type}`, { requestId: message.requestId, ok: response?.ok, error: response?.error });
   postBridgeResponse(win, message.type, message.requestId, response);
   return true;
 }
@@ -80,6 +89,7 @@ function postBridgeCommand(win, type) {
 
 function handleRuntimeCommand(message, win = globalThis.window) {
   if (message?.type !== 'TRACKER_REFRESH_NOW') return false;
+  log.debug('Popup asked this page to refresh');
   postBridgeCommand(win, 'EXTENSION_REFRESH_NOW');
   return true;
 }
@@ -91,6 +101,13 @@ if (globalThis.chrome?.runtime?.onMessage?.addListener) {
     sendResponse({ ok: handled });
     return false;
   });
+}
+
+// The first line the page console shows. If it is absent, the content script
+// was never injected here -- check the origin against the manifest's
+// content_scripts matches -- and every bridge request will time out untouched.
+if (globalThis.chrome?.runtime?.id) {
+  log.debug(`Bridge ready on ${globalThis.location?.origin}`);
 }
 
 if (globalThis.window?.addEventListener) {

@@ -75,8 +75,43 @@ npm test
 
 After changing extension files, reload the unpacked extension and refresh the tracker page.
 
+## See what the extension is doing
+
+The extension traces its own work to the browser console. Routine steps use
+`console.debug`, which Chrome hides unless the log level filter includes
+**Verbose** — turn that on first or you will see only the failures.
+
+The trace is split across three consoles, and which one stays empty is itself
+the diagnosis:
+
+| Console | How to open | Prefix |
+| --- | --- | --- |
+| Service worker | `chrome://extensions` → the card → **service worker** | `[TMT worker]` |
+| Dashboard page | DevTools on the tracker tab | `[TMT content]` and `[TMT page]` |
+| Popup | right-click inside the popup → **Inspect** | `[TMT popup]` |
+
+A healthy sync reads roughly:
+
+```
+[TMT page]    Requesting EXTENSION_LIST_TABS
+[TMT content] Forwarding EXTENSION_LIST_TABS to the service worker
+[TMT worker]  Service worker started
+[TMT worker]  Message received: LIST_TABS
+[TMT worker]  Tab discovery: 2 provider tabs matched, 14 visible to the extension
+[TMT content] Answering EXTENSION_LIST_TABS
+[TMT page]    Reply for EXTENSION_LIST_TABS
+```
+
+`Service worker started` appears on every wake, not only on install: MV3 evicts
+the worker after roughly 30 idle seconds and re-evaluates it on the next
+message. Seeing it repeatedly is normal.
+
+Nothing is logged to disk, and no scraped page text or quota value reaches the
+console — only what happened, where, and why it stopped.
+
 ## Troubleshooting
 
+- **"Extension request timed out":** the page got no answer at all. Look in the dashboard console for a `[TMT content] Bridge ready` line at page load. If it is missing, the content script was never injected on this origin, so the service worker never saw the request — compare the page origin against `content_scripts[0].matches` in `manifest.json`.
 - **Extension unavailable:** reload the extension, then refresh the tracker so the content script is reinjected.
 - **No tabs listed:** open the provider page in a normal web tab, then refresh the available-tab list.
 - **One tab fails:** read the explicit error shown by the tracker; other selected-tab results can still be returned.

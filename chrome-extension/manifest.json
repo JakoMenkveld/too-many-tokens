@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Too Many Tokens Provider Sync",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Discover every quota on selected provider tabs and sync it to the Too Many Tokens dashboard.",
   "permissions": [
     "scripting",
@@ -27,6 +27,7 @@
         "http://127.0.0.1:5074/*"
       ],
       "js": [
+        "log.js",
         "content-script.js"
       ],
       "run_at": "document_idle"

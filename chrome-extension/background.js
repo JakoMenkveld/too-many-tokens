@@ -2,7 +2,7 @@
 
 let scraperApi = globalThis.UsageScraper;
 if (!scraperApi && typeof importScripts === 'function') {
-  importScripts('tracker-origins.js', 'providers.js', 'scraper.js');
+  importScripts('log.js', 'tracker-origins.js', 'providers.js', 'scraper.js');
   scraperApi = globalThis.UsageScraper;
 }
 if (!scraperApi && typeof require === 'function') {
@@ -12,6 +12,9 @@ const providers = globalThis.UsageProviders
   || (typeof require === 'function' ? require('./providers.js') : null);
 const trackerOrigins = globalThis.TrackerOrigins
   || (typeof require === 'function' ? require('./tracker-origins.js') : null);
+const trackerLog = globalThis.TrackerLog
+  || (typeof require === 'function' ? require('./log.js') : null);
+const log = trackerLog.createLogger('worker');
 
 const TRACKER_URL = trackerOrigins.DEFAULT_TRACKER_URL;
 const RELOAD_TIMEOUT_MS = 12_000;
@@ -364,13 +367,19 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
 
   try {
     const tab = await chromeApi.tabs.get(tabId);
+    log.debug(`Scan starting for tab ${tabId}`, { url: tab?.url, status: tab?.status });
     if (!isScannableTab(tab)) {
+      log.warn(`Scan refused for tab ${tabId}: not a scannable tab`, tab?.url);
       return { result: null, results: [], error: 'The selected tab cannot be scanned.' };
     }
 
     // Claimed before the reload, so a rejected scan never touches the provider.
     const allowance = await claimScanAllowance(tab.url, chromeApi, nowValue, options.cooldownMs);
     if (!allowance.allowed) {
+      log.warn(
+        `Scan refused for tab ${tabId}: cooldown, ${Math.round(allowance.retryAfterMs / 1000)}s remaining`,
+        { key: scanCooldownKey(tab.url) }
+      );
       return {
         result: null,
         results: [],
@@ -382,7 +391,9 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
     const reloadForScan = typeof options.reloadTabAndWait === 'function'
       ? options.reloadTabAndWait
       : reloadTabAndWait;
+    log.debug(`Allowance claimed for tab ${tabId}; reloading`);
     await reloadForScan(tabId, chromeApi, options);
+    log.debug(`Tab ${tabId} finished reloading`);
 
     const settleMs = boundedDuration(
       options.settleMs,
@@ -396,6 +407,7 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
 
     const refreshedTab = await chromeApi.tabs.get(tabId);
     if (!isScannableTab(refreshedTab)) {
+      log.warn(`Tab ${tabId} is no longer scannable after reloading`, refreshedTab?.url);
       return { result: null, results: [], error: 'The reloaded tab cannot be scanned.' };
     }
 
@@ -443,6 +455,7 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
       });
       attempts += 1;
       if (!injection?.result) {
+        log.warn(`Tab ${tabId} returned no page data on attempt ${attempts}`);
         return { result: null, results: [], error: 'The selected tab returned no page data.' };
       }
 
@@ -452,6 +465,11 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
         tabId,
         refreshedTab.title,
         nowValue
+      );
+      // Page text length, not the text itself: enough to tell 'the page had not
+      // rendered yet' apart from 'it rendered and the scraper matched nothing'.
+      log.debug(
+        `Snapshot ${attempts} for tab ${tabId}: ${lastBodyLength} chars of page text, ${results.length} quota(s) parsed`
       );
       if (results.length) {
         return {
@@ -475,12 +493,14 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
 
     const elapsedMs = Math.max(0, Math.round(now() - snapshotStartedAt));
     const attemptLabel = attempts === 1 ? 'attempt' : 'attempts';
+    log.warn(`Tab ${tabId} produced no usable quota after ${attempts} ${attemptLabel} over ${elapsedMs} ms`);
     return {
       result: null,
       results: [],
       error: `No supported usage value was found after ${attempts} snapshot ${attemptLabel} over ${elapsedMs} ms (last page text length: ${lastBodyLength}).`
     };
   } catch (error) {
+    log.error(`Scan of tab ${tabId} threw`, error);
     return {
       result: null,
       results: [],
@@ -491,9 +511,17 @@ async function scanTab(tabId, chromeApi = globalThis.chrome, nowValue = Date.now
 
 async function listScannableTabs(chromeApi = globalThis.chrome) {
   const tabs = await chromeApi.tabs.query({});
-  return tabs
+  const discoverable = tabs
     .filter(isDiscoverableProviderTab)
     .map((tab) => ({ id: tab.id, title: tab.title || tab.url, url: tab.url, status: tab.status || 'complete' }));
+  // Both halves matter when discovery comes back empty: no visible tabs at all
+  // means the host permissions are not granted, while visible-but-unmatched
+  // means the provider registry did not recognise the route.
+  log.debug(
+    `Tab discovery: ${discoverable.length} provider tab(s) matched, ${tabs.length} visible to the extension`,
+    { matched: discoverable.map((tab) => tab.url), visible: tabs.map((tab) => tab.url || '(no url)') }
+  );
+  return discoverable;
 }
 
 async function scanTabIds(tabIds, chromeApi = globalThis.chrome, nowValue = Date.now(), options = {}) {
@@ -522,6 +550,11 @@ async function getAllUsageFromTabs(chromeApi = globalThis.chrome) {
 }
 
 function handleRuntimeMessage(message, sender, sendResponse, chromeApi = globalThis.chrome) {
+  log.debug(`Message received: ${message?.type || '(no type)'}`, {
+    from: sender?.tab?.url || sender?.url || '(unknown sender)',
+    tabId: sender?.tab?.id ?? null
+  });
+
   if (isExtensionUiSender(sender, chromeApi)) {
     if (message?.type === 'POPUP_OPEN_TRACKER') {
       openOrFocusTracker(chromeApi)
@@ -542,6 +575,10 @@ function handleRuntimeMessage(message, sender, sendResponse, chromeApi = globalT
   }
 
   if (!isTrustedTrackerSender(sender)) {
+    log.warn('Rejected: sender is not a trusted tracker origin', {
+      sender: sender?.tab?.url || sender?.url || '(unknown sender)',
+      trusted: trackerOrigins.TRACKERS.map((tracker) => tracker.url)
+    });
     sendResponse({ ok: false, error: 'Request rejected: untrusted tracker origin.' });
     return false;
   }
@@ -561,10 +598,19 @@ function handleRuntimeMessage(message, sender, sendResponse, chromeApi = globalT
     // The page cannot ask for the shorter floor. It is granted only if a popup
     // click was recorded here moments ago, and consuming it spends it.
     consumeManualGesture(chromeApi, Date.now())
-      .then((manual) => scanTabIds(message.details?.tabIds, chromeApi, Date.now(), {
-        cooldownMs: manual ? MANUAL_SCAN_COOLDOWN_MS : SCAN_COOLDOWN_MS
-      }))
-      .then(({ results, errors }) => sendResponse({ ok: true, results, errors }))
+      .then((manual) => {
+        log.debug(`Scanning ${(message.details?.tabIds || []).length} tab(s)`, {
+          tabIds: message.details?.tabIds,
+          cooldown: manual ? '60s (popup gesture)' : '5m (standard)'
+        });
+        return scanTabIds(message.details?.tabIds, chromeApi, Date.now(), {
+          cooldownMs: manual ? MANUAL_SCAN_COOLDOWN_MS : SCAN_COOLDOWN_MS
+        });
+      })
+      .then(({ results, errors }) => {
+        log.debug(`Scan finished: ${results.length} quota(s), ${errors.length} failure(s)`, { errors });
+        sendResponse({ ok: true, results, errors });
+      })
       .catch((error) => sendResponse({
         ok: false,
         error: errorMessage(error, 'Unable to scan the selected tabs.'),
@@ -597,6 +643,7 @@ async function requestTrackerRefresh(chromeApi = globalThis.chrome, nowValue = D
   const tabs = await chromeApi.tabs.query({});
   const trackerTab = tabs.find((tab) => isTrackerUrl(tab.url));
   if (!trackerTab?.id) {
+    log.debug('No dashboard tab open; opening one', { trusted: trackerOrigins.TRACKERS.map((t) => t.url) });
     const tabId = await openOrFocusTracker(chromeApi);
     return { refreshed: false, opened: true, tabId, message: 'Opened the dashboard. Press Sync there once it loads.' };
   }
@@ -604,7 +651,11 @@ async function requestTrackerRefresh(chromeApi = globalThis.chrome, nowValue = D
   await recordManualGesture(chromeApi, nowValue);
   try {
     await chromeApi.tabs.sendMessage(trackerTab.id, { type: 'TRACKER_REFRESH_NOW' });
+    log.debug(`Refresh command delivered to dashboard tab ${trackerTab.id}`);
   } catch (error) {
+    // Almost always the content script missing from that tab: either the page
+    // predates the last extension reload, or its origin is not in the manifest.
+    log.error(`Dashboard tab ${trackerTab.id} did not receive the refresh command`, error);
     // The refresh never reached the page, so give the allowance back rather than
     // leaving it armed for whatever scan happens to come along next.
     await consumeManualGesture(chromeApi, nowValue);
@@ -635,6 +686,26 @@ async function openOrFocusTracker(chromeApi = globalThis.chrome) {
 
 if (globalThis.chrome?.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+}
+
+// This runs on every wake, not just on install: MV3 evicts the worker after
+// roughly 30 idle seconds and re-evaluates this file when the next message
+// arrives, so each of these lines marks a fresh worker.
+if (globalThis.chrome?.runtime?.id) {
+  log.debug('Service worker started', {
+    version: chrome.runtime.getManifest?.().version,
+    trackerOrigins: trackerOrigins.TRACKERS.map((tracker) => tracker.url),
+    providerOrigins: providers.allOrigins(),
+    scanCooldown: `${SCAN_COOLDOWN_MS / 60000}m`
+  });
+
+  chrome.runtime.onInstalled?.addListener?.((details) => {
+    log.debug(`Extension ${details?.reason || 'installed'}`, details);
+  });
+
+  chrome.runtime.onStartup?.addListener?.(() => {
+    log.debug('Browser started');
+  });
 }
 
 // No action.onClicked listener: the manifest declares a default_popup, and

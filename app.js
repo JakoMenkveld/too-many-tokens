@@ -5,6 +5,14 @@ const PREFERENCES_STORAGE_KEY = 'llmRunRateTracker.preferences';
 const PREFERENCES_SCHEMA_VERSION = 6;
 const LEGACY_PREFERENCES_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5]);
 const EXTENSION_BRIDGE_CHANNEL = 'llm-run-rate-tracker';
+
+// Page-side half of the extension trace. The extension's own log.js is not part
+// of the server's asset allow-list, so this is a local helper rather than a
+// shared file. console.debug is hidden unless DevTools includes Verbose.
+function bridgeLog(message, detail) {
+	if (detail === undefined) console.debug('%c[TMT page]', 'color:#8b7fff;font-weight:600', message);
+	else console.debug('%c[TMT page]', 'color:#8b7fff;font-weight:600', message, detail);
+}
 // Refreshes are a bounded run the user starts, not a background loop. A run is
 // at most REFRESH_COUNT_MAX reloads spaced at least REFRESH_INTERVAL_MIN_SECONDS
 // apart, and it stops on its own. Nothing here re-arms itself.
@@ -1914,9 +1922,11 @@ async function sendExtensionRequest(type, details = {}, timeoutMs = 15_000) {
 				|| event.data?.type !== responseType
 				|| event.data?.requestId !== requestId
 			) return;
+			bridgeLog(`Reply for ${type}`, { requestId, ok: event.data.payload?.ok, error: event.data.payload?.error });
 			finish(event.data.payload);
 		}
 		window.addEventListener('message', onMessage);
+		bridgeLog(`Requesting ${type}`, { requestId, details, timeoutMs });
 		window.postMessage({
 			channel: EXTENSION_BRIDGE_CHANNEL,
 			direction: 'request',
@@ -1924,7 +1934,18 @@ async function sendExtensionRequest(type, details = {}, timeoutMs = 15_000) {
 			requestId,
 			details
 		}, window.location.origin);
-		timer = setTimeout(() => finish({ ok: false, error: 'Extension request timed out.' }), timeoutMs);
+		timer = setTimeout(() => {
+			// Nothing answered at all. If no '[TMT content]' line appeared above,
+			// the content script is not running on this origin and the request was
+			// never picked up -- the service worker never saw it either.
+			console.warn(
+				'%c[TMT page]',
+				'color:#8b7fff;font-weight:600',
+				`${type} timed out after ${timeoutMs} ms with no reply from the extension bridge`,
+				{ requestId, origin: window.location.origin }
+			);
+			finish({ ok: false, error: 'Extension request timed out.' });
+		}, timeoutMs);
 	});
 }
 

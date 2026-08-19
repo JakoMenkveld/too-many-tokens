@@ -4,6 +4,8 @@
 // to record the click and hand the existing dashboard its normal refresh, so
 // there is exactly one code path that reads a provider page.
 
+const log = globalThis.TrackerLog.createLogger('popup');
+
 const refreshButton = document.getElementById('refresh');
 const openButton = document.getElementById('open');
 const statusBox = document.getElementById('status');
@@ -35,7 +37,9 @@ async function run(button, type, busyText) {
   openButton.disabled = true;
   setStatus(busyText);
 
+  log.debug(`Sending ${type}`);
   const response = await sendMessage(type);
+  log.debug(`${type} answered`, response);
   if (!response.ok) {
     setStatus(response.error || 'That did not work.', 'error');
     refreshButton.disabled = false;
