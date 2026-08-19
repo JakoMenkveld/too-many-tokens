@@ -1537,7 +1537,7 @@ function renderRunwayView(models) {
 				: `${formatDurationHours(physics.marginHours)} spare`;
 		const gateLabel = physics.rollHours === null
 			? 'no rate yet'
-			: physics.rollHours <= 0 ? 'quota dry' : `${formatDurationHours(physics.rollHours)} to dry`;
+			: physics.rollHours <= 0 ? 'quota dry' : `dry in ${formatDurationHours(physics.rollHours)}`;
 		const sceneLabel = `${trackerDisplayLabel(model)}: ${physics.status}. ${physics.detail}${ghostNote ? ` ${ghostNote}` : ''} Pace ${hud.pace} against ideal, burn rate ${hud.rate.toLowerCase()}.`;
 
 		// Between the flag and the wall: quota to spare at reset, or the
@@ -1608,6 +1608,7 @@ function renderRunwayView(models) {
 					<rect class="rw-earth" x="0" y="140" width="${view.width}" height="60"></rect>
 					<rect class="rw-beyond" x="${view.wallX}" y="140" width="${view.width - view.wallX}" height="32"></rect>
 					<rect class="rw-asphalt" x="0" y="140" width="${view.wallX}" height="32"></rect>
+					<rect class="rw-runway-end" x="${view.wallX - 1.5}" y="140" width="3" height="32"></rect>
 					<g class="rw-flow" aria-hidden="true">${flow.join('')}</g>
 					${zone}
 					${wallMarkup(physics.state)}
@@ -1628,7 +1629,7 @@ function renderRunwayView(models) {
 	return `
 		<article class="panel chart-panel runway-panel">
 			<div class="panel-heading">
-				<div><h2>Quota Runway</h2><p class="runway-intro">You are the solid aircraft, standing at the quota you have burned; the hollow ghost is even pace — pull ahead of it and you are burning too fast. The runway ends where the quota runs dry. The checkered post is where the reset catches you: short of the end, quota to spare; past it, dry before the reset.</p></div>
+				<div><h2>Quota Runway</h2><p class="runway-intro">You are the solid aircraft, standing at the quota you have burned; the hollow ghost is even pace — pull ahead of it and you are burning too fast. The red-and-white wall is the quota running dry; the post with the blue light is the reset. Post short of the wall: the reset reaches you first, and the gap is your spare. Post past the wall: you run dry before it.</p></div>
 				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-ghostjet-key"></i>Even-pace ghost</span><span><i class="runway-ghost-key"></i>Previous projection</span></div></div>
 			</div>
 			<div class="runway-grid-layout">${cards}</div>

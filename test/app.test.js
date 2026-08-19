@@ -1349,7 +1349,7 @@ test('runway view renders the scene from the numbers rather than from a class', 
   assert.match(html, /Ample runway/);
   assert.match(html, /Off the end/);
   assert.match(html, /Δ PACE/);
-  assert.match(html, /to dry/);
+  assert.match(html, /dry in /);
   assert.match(html, /reset in /);
   assert.match(html, /<dt>Margin at reset<\/dt><dd>3d spare/);
   assert.match(html, /<dt>Reset<\/dt><dd>Thu, 13 Aug 2099 at 14:30/);

@@ -821,7 +821,8 @@ select:focus-visible {
 .rw-star { fill: #8ea4c4; opacity: 0.5; }
 .rw-earth { fill: #0a0e16; }
 .rw-asphalt { fill: #242b38; }
-.rw-beyond { fill: #0d1119; }
+.rw-beyond { fill: #090c12; }
+.rw-runway-end { fill: #04060a; }
 
 .rw-flow rect { fill: rgba(240, 245, 255, 0.5); }
 .rw-flow circle { fill: color-mix(in srgb, var(--runway-tint) 70%, #eef4ff); }
