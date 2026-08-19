@@ -1158,39 +1158,36 @@ function renderPaceGraphs(models) {
 	`;
 }
 
-// The runway is the quota you have left; the distance you must cover before you
-// are allowed to stop is the time to the reset. You land safely when the quota
-// outlasts the cycle. Every number the scene draws with comes off that one
-// ratio, so the picture moves continuously with severity instead of flipping
-// between two pre-baked outcomes.
-const RUNWAY_PERSPECTIVE = 0.55;
-// Where the parked aircraft sits, as a percentage down the strip. 0 is the
-// horizon, 100 is directly under the camera, so larger is nearer.
-const RUNWAY_STOP_DEPTH = 88;
-const RUNWAY_HORIZON_DEPTH = 4;
-// How much surplus (margin - 1) fills the whole visible strip, and how much
-// shortfall reads as a total loss. Both are display spans, not thresholds.
+// The scene is a side view on one time axis: the aircraft rolls right, the
+// runway ends at the reset, and a lit gate marks where the quota runs dry.
+// Past the end of the runway is the good side -- quota that outlasts the
+// cycle. Every x-coordinate below is a time reading in disguise, which is what
+// lets the tests assert on the picture directly.
+const RUNWAY_VIEW = Object.freeze({
+	width: 720,
+	height: 200,
+	// Nose of the aircraft. The axis starts here: this is "now".
+	planeX: 150,
+	// The runway ends at the reset, at the same x on every live card, so two
+	// cards side by side compare by eye.
+	resetX: 520,
+	// The dry gate never sits inside the airframe or off the right edge.
+	minX: 172,
+	maxX: 700
+});
+// How much surplus (margin - 1) counts as fully ample, and how much shortfall
+// as a total loss. Display spans for severity, not thresholds.
 const RUNWAY_SURPLUS_SPAN = 1.5;
 const RUNWAY_DROP_SPAN = 0.5;
 const RUNWAY_MIN_GHOST_GAP_MS = 60_000;
 // Every scene value the card publishes, and the subset that is applied once
-// rather than transitioned between readings.
-const RUNWAY_SCENE_PROPERTIES = Object.freeze(['severity', 'speed', 'brake', 'ghost', 'ghost-scale', 'ghost-dir', 'approach', 'end', 'drop']);
-const RUNWAY_STATIC_PROPERTIES = Object.freeze(['severity', 'speed', 'brake', 'ghost', 'ghost-scale', 'ghost-dir', 'approach']);
-// Last settled scene geometry per tracker, so a re-render can transition from
-// where the scene already was instead of snapping. Keyed by tracker id.
+// rather than transitioned between readings. Only the dry gate moves on a
+// refresh; everything else is positioned by plain SVG attributes.
+const RUNWAY_SCENE_PROPERTIES = Object.freeze(['severity', 'speed', 'dry', 'approach', 'approach-dx']);
+const RUNWAY_STATIC_PROPERTIES = Object.freeze(['severity', 'speed', 'approach', 'approach-dx']);
+// Last settled gate position per tracker, so a re-render can slide from where
+// the scene already was instead of snapping. Keyed by tracker id.
 const runwaySettled = new Map();
-
-function runwayDepth(fraction) {
-	// Ground-plane projection: near distance spreads out, far distance
-	// compresses toward the horizon. Without this a runway drawn from linear
-	// numbers reads as a bar tipped on its side rather than as a surface.
-	const value = clamp(Number(fraction) || 0, 0, 1);
-	const screen = (value * (1 + RUNWAY_PERSPECTIVE)) / (value + RUNWAY_PERSPECTIVE);
-	// The gate never quite reaches the horizon, so even an ample runway shows
-	// the threshold it is measured against rather than trailing off to nothing.
-	return RUNWAY_HORIZON_DEPTH + (RUNWAY_STOP_DEPTH - RUNWAY_HORIZON_DEPTH) * (1 - screen);
-}
 
 // Shared by projectedDepletionContext and the runway scene. The two disagreed
 // about nothing yet, but they were deriving the same five numbers side by side,
@@ -1368,81 +1365,58 @@ function runwayDetail(state, marginHours) {
 	return `The quota runs dry ${span} before the reset, well short of it.`;
 }
 
-// Screen geometry, kept apart from the physics so the mapping from a margin to a
-// picture is one readable function rather than arithmetic sprinkled through the
-// template.
-function runwayGateDepth(surplus, drop) {
-	return drop > 0
-		? RUNWAY_STOP_DEPTH + drop * 9
-		: runwayDepth(Math.max(surplus, 0) / RUNWAY_SURPLUS_SPAN);
-}
-
-// A ghost further from the camera than the aircraft is drawn smaller, or the
-// scene reads as two aircraft side by side rather than one behind the other.
-function runwayGhostScale(depth) {
-	// Capped well below the real airframe: a ghost that grows to match it stops
-	// reading as a marker and starts competing with the aircraft it annotates.
-	return clamp(0.14 + 0.52 * (depth / RUNWAY_STOP_DEPTH), 0.14, 0.66);
+// Screen geometry, kept apart from the physics so the mapping from a margin to
+// a picture is one readable function rather than arithmetic sprinkled through
+// the template. Margin 1 lands the dry gate exactly on the reset threshold.
+function runwayX(margin) {
+	const view = RUNWAY_VIEW;
+	if (margin <= 1) return Math.max(view.minX, view.planeX + (view.resetX - view.planeX) * margin);
+	// Beyond the end of the runway the axis compresses asymptotically, so spare
+	// keeps reading as more spare without ever leaving the card, and two ample
+	// cards still differ on screen instead of pinning to the same edge.
+	const surplus = margin - 1;
+	return view.resetX + (view.maxX - view.resetX) * (surplus / (surplus + 1));
 }
 
 function runwayScene(physics) {
-	const endDepth = runwayGateDepth(physics.surplus, physics.drop);
+	const view = RUNWAY_VIEW;
 
-	// Once the quota is gone there is no runway left to measure, only time. The
-	// ghost stops being the previous reading and becomes the reset itself,
-	// waiting down the runway at a distance set by how long is left, so the
-	// wreck closes on it as the wait runs down. It is drawn differently because
-	// it means something different -- one shape with two meanings would be the
-	// kind of thing that makes a chart lie.
+	// Once the quota is gone there is no roll left to project, only the wait.
+	// The reset stands on the runway at a distance set by how long is left and
+	// closes on the parked aircraft in real time, so the card counts down by
+	// geometry. Its crawl duration is recomputed on every render, which
+	// re-syncs it to the clock instead of drifting.
 	if (physics.state === 'exhausted' && physics.runwayHours > 0 && physics.cycleHours > 0) {
 		const waiting = clamp(physics.runwayHours / physics.cycleHours, 0, 1);
-		const depth = runwayDepth(waiting);
+		const resetX = clamp(view.planeX + (view.maxX - view.planeX) * waiting, view.planeX + 34, view.maxX - 10);
 		return {
-			endDepth,
-			ghost: {
-				kind: 'reset',
-				depth,
-				scale: runwayGhostScale(depth),
-				direction: 0,
-				// The crawl is driven by the remaining wait, so a re-render
-				// restarts it from a freshly computed distance rather than
-				// drifting out of step with the clock.
-				approachSeconds: Math.round(clamp(physics.runwayHours, 0, 24 * 14) * 3600)
+			dryX: view.planeX + 12,
+			resetX,
+			ghost: null,
+			approach: {
+				seconds: Math.round(clamp(physics.runwayHours, 0, 24 * 14) * 3600),
+				dx: Math.max(0, resetX - (view.planeX + 24))
 			}
 		};
 	}
 
-	if (!physics.ghost || physics.marginHours === null) return { endDepth, ghost: null };
+	const dryX = physics.margin === null ? null : runwayX(physics.margin);
+	if (!physics.ghost || physics.marginHours === null || dryX === null) {
+		return { dryX, resetX: view.resetX, ghost: null, approach: null };
+	}
 
-	const ghostSurplus = clamp(physics.ghost.margin - 1, -RUNWAY_DROP_SPAN, RUNWAY_SURPLUS_SPAN);
-	const ghostDrop = ghostSurplus < 0 ? clamp(-ghostSurplus / RUNWAY_DROP_SPAN, 0, 1) : 0;
-	const ghostGate = runwayGateDepth(ghostSurplus, ghostDrop);
-
-	// The aircraft is parked at the camera, so the ghost is offset by however
-	// far the gate has moved since the previous reading. A gate that came nearer
-	// means ground was covered: the aircraft is now ahead of where it was, and
-	// the ghost falls behind it.
+	// The ghost gate is the same measurement one reading ago, on the same axis,
+	// so which side it lands on is the whole comparison: right of the live gate
+	// means the quota was going to last longer than it does now.
 	const change = physics.marginHours - physics.ghost.marginHours;
-	const direction = Math.abs(change) * 60 < 6 ? 0 : change < 0 ? 1 : -1;
-	// Two aircraft drawn almost on top of each other read as one with a shadow,
-	// so a real difference is given a floor of separation. The gap is a
-	// direction, not a distance -- the footer carries the actual hours.
-	// The camera rides with the aircraft, so there is almost no runway behind it
-	// to draw on: a ghost placed past the airframe lands off the bottom of the
-	// stage, or behind an aircraft that fills it. So the ghost is always set down
-	// ahead, its distance carrying how much changed and its colour which way --
-	// rose when ground was lost since the last reading, mint when it was gained.
-	const offset = Math.abs(endDepth - ghostGate);
-	const depth = clamp(RUNWAY_STOP_DEPTH - Math.max(offset, direction === 0 ? 0 : 12), 10, RUNWAY_STOP_DEPTH);
 	return {
-		endDepth,
+		dryX,
+		resetX: view.resetX,
 		ghost: {
-			kind: 'previous',
-			depth,
-			scale: runwayGhostScale(depth),
-			direction,
-			approachSeconds: 0
-		}
+			x: runwayX(physics.ghost.margin),
+			direction: Math.abs(change) * 60 < 6 ? 0 : change < 0 ? 1 : -1
+		},
+		approach: null
 	};
 }
 
@@ -1484,9 +1458,41 @@ function runwayOutcome(model) {
 	};
 }
 
+// One aircraft, drawn in profile facing its direction of travel. The wing and
+// engine are on the near side, so they paint over the fuselage; gear and fin
+// paint under it. The dead variant greys out and smoulders.
+function runwayJetMarkup(state) {
+	const dead = state === 'exhausted';
+	return `
+					<g class="rw-jet${dead ? ' rw-jet-dead' : ''}" aria-hidden="true">
+						<ellipse class="rw-jet-shadow" cx="106" cy="141.5" rx="52" ry="3.6"></ellipse>
+						<path class="rw-jet-fin" d="M80 114 L62 86 L74 86 L94 114 Z"></path>
+						<circle class="rw-beacon" cx="64" cy="84.5" r="2.2"></circle>
+						<path class="rw-jet-tail" d="M72 117 L54 124 L72 124 Z"></path>
+						<line class="rw-jet-strut" x1="104" y1="128" x2="104" y2="136"></line>
+						<line class="rw-jet-strut" x1="138" y1="128" x2="138" y2="136"></line>
+						<circle class="rw-jet-wheel" cx="104" cy="137" r="3.1"></circle>
+						<circle class="rw-jet-wheel" cx="138" cy="137" r="2.7"></circle>
+						<path class="rw-jet-body" d="M66 113 L128 113 Q149 113 154 121 Q149 129 128 129 L74 129 Q64 129 64 121 Q64 113 66 113 Z"></path>
+						<path class="rw-jet-belly" d="M64.5 123 L151.5 123 Q146 129 128 129 L74 129 Q66.5 129 64.5 123 Z"></path>
+						<path class="rw-jet-nose" d="M144 113.8 Q152 116 155 120.6 Q152 125.5 144 127.6 Z"></path>
+						<path class="rw-jet-cockpit" d="M133 114.4 L143 114.2 Q148.5 116.5 149.5 119.6 L133 119.8 Z"></path>
+						<path class="rw-jet-wing" d="M101 121 L80 136 L97 136 L119 121 Z"></path>
+						<ellipse class="rw-jet-engine" cx="90" cy="133" rx="8.6" ry="4.6"></ellipse>
+						<circle class="rw-jet-intake" cx="82.6" cy="133" r="3.4"></circle>${dead ? `
+						<ellipse class="rw-ember" cx="95" cy="130" rx="13" ry="5"></ellipse>
+						<circle class="rw-smoke" cx="96" cy="116" r="4"></circle>
+						<circle class="rw-smoke" cx="102" cy="112" r="5.4"></circle>
+						<circle class="rw-smoke" cx="90" cy="109" r="3.4"></circle>` : ''}
+					</g>`;
+}
+
 function renderRunwayView(models) {
 	const ordered = sortTrackersAlphabetically(models).slice(0, 6);
 	if (!ordered.length) return renderEmptyPacePanel('runway');
+	const view = RUNWAY_VIEW;
+	const stars = [[64, 26], [180, 52], [318, 18], [472, 44], [608, 30], [676, 68]]
+		.map(([x, y]) => `<circle class="rw-star" cx="${x}" cy="${y}" r="1.1"></circle>`).join('');
 	const cards = ordered.map((model) => {
 		const physics = runwayPhysics(model);
 		const scene = runwayScene(physics);
@@ -1505,72 +1511,83 @@ function renderRunwayView(models) {
 			? 'no rate yet'
 			: physics.rollHours <= 0 ? 'quota dry' : `${formatDurationHours(physics.rollHours)} to dry`;
 		const sceneLabel = `${trackerDisplayLabel(model)}: ${physics.status}. ${physics.detail}${ghostNote ? ` ${ghostNote}` : ''} Pace ${hud.pace} against ideal, burn rate ${hud.rate.toLowerCase()}.`;
-		// The scene's numbers travel as data attributes and are applied by
-		// settleRunwayCards(). They deliberately do not travel in a style
-		// attribute: the dashboard is served under `style-src 'self'` with no
-		// 'unsafe-inline' (serve.js), so the browser drops style attributes and
-		// every card would fall back to the registered initial values -- one
-		// identical runway on every tracker, whatever the numbers said.
+
+		// Ground markings loop with a 48px period; they stop short of the
+		// threshold so the moving region never slides under the reset post.
+		const flow = [];
+		for (let x = -48; x + 22 <= scene.resetX - 16; x += 48) {
+			flow.push(`<rect x="${x}" y="154" width="22" height="3" rx="1.5"></rect>`);
+			flow.push(`<circle cx="${x + 11}" cy="142.5" r="1.8"></circle>`);
+			flow.push(`<circle cx="${x + 11}" cy="169.5" r="1.8"></circle>`);
+		}
+
+		// Between the dry gate and the reset: spare quota past the end of the
+		// runway, or the stretch you would be stranded on. During a countdown
+		// the sliding reset post carries that story instead.
+		const zone = scene.approach || scene.dryX === null ? '' : scene.dryX >= scene.resetX
+			? `<rect class="rw-zone rw-zone-spare" x="${scene.resetX.toFixed(1)}" y="146" width="${(scene.dryX - scene.resetX).toFixed(1)}" height="20" rx="3"></rect>`
+			: `<rect class="rw-zone rw-zone-short" x="${scene.dryX.toFixed(1)}" y="146" width="${(scene.resetX - scene.dryX).toFixed(1)}" height="20" rx="3"></rect>`;
+
+		// The label offset keeps text on-card when the gate is near either edge.
+		const labelDx = scene.dryX === null ? 0 : scene.dryX > 640 ? 640 - scene.dryX : scene.dryX < 210 ? 210 - scene.dryX : 0;
+		const dryGroup = scene.dryX === null
+			? `<text class="rw-label rw-note" x="330" y="112" text-anchor="middle">no rate yet</text>`
+			: `<g class="rw-dry">
+						<line x1="0" y1="96" x2="0" y2="140"></line>
+						<circle class="rw-dry-light" cx="0" cy="90" r="4.5"></circle>
+						<text class="rw-label rw-dry-label" x="${labelDx}" y="76" text-anchor="middle">${escapeHtml(gateLabel)}</text>
+					</g>`;
+
+		// The threshold's slider is a separate inner group because a CSS
+		// transform would override the outer group's positioning attribute.
+		const resetGroup = `<g class="rw-reset" transform="translate(${scene.resetX.toFixed(1)} 0)">
+						<g class="rw-reset-slider${scene.approach ? ' rw-reset-approach' : ''}">
+							<rect class="rw-check-a" x="-12" y="140" width="8" height="7"></rect>
+							<rect class="rw-check-b" x="-4" y="140" width="8" height="7"></rect>
+							<rect class="rw-check-a" x="4" y="140" width="8" height="7"></rect>
+							<rect class="rw-reset-post" x="-2" y="98" width="4" height="42" rx="1"></rect>
+							<circle class="rw-reset-light" cx="0" cy="93" r="4"></circle>
+							<text class="rw-label rw-reset-label" x="0" y="190" text-anchor="middle">${escapeHtml(reset ? `reset in ${formatCountdown(reset)}` : 'reset pending')}</text>
+						</g>
+					</g>`;
+
+		const ghostGroup = scene.ghost ? `<g class="rw-ghost ${scene.ghost.direction > 0 ? 'rw-ghost-worse' : scene.ghost.direction < 0 ? 'rw-ghost-better' : 'rw-ghost-level'}" transform="translate(${scene.ghost.x.toFixed(1)} 0)">
+						<line x1="0" y1="114" x2="0" y2="140"></line>
+						<path d="M0 106 L5 114 L-5 114 Z"></path>
+					</g>` : '';
+
+		// The scene's two animated numbers travel as data attributes and are
+		// applied by settleRunwayCards() through CSSOM, never a style attribute:
+		// serve.js sends style-src 'self' with no 'unsafe-inline', so the
+		// browser drops style attributes outright. All static geometry is plain
+		// SVG attributes, which CSP does not govern.
 		const previous = runwaySettled.get(String(model.id ?? ''));
 		return `
 			<article class="runway-card runway-${physics.state}"
 				data-runway-id="${escapeHtml(String(model.id ?? ''))}"
-				data-runway-end="${scene.endDepth.toFixed(2)}"
-				data-runway-drop="${physics.drop.toFixed(3)}"
 				data-runway-severity="${physics.severity.toFixed(3)}"
 				data-runway-speed="${physics.speed.toFixed(3)}"
-				data-runway-brake="${physics.brake.toFixed(3)}"
-				data-runway-ghost="${(scene.ghost?.depth ?? scene.endDepth).toFixed(2)}"
-				data-runway-ghost-scale="${(scene.ghost?.scale ?? 1).toFixed(3)}"
-				data-runway-ghost-dir="${scene.ghost?.direction ?? 0}"
-				data-runway-approach="${scene.ghost?.approachSeconds ?? 0}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.end.toFixed(2)},${previous.drop.toFixed(3)}"` : ''}>
+				data-runway-dry="${(scene.dryX ?? view.planeX).toFixed(2)}"
+				data-runway-approach="${scene.approach ? scene.approach.seconds : 0}"
+				data-runway-approach-dx="${scene.approach ? scene.approach.dx.toFixed(1) : 0}"${previous ? `\n\t\t\t\tdata-runway-from="${previous.dry.toFixed(2)}"` : ''}>
 				<header class="runway-card-header">
 					<div><strong>${escapeHtml(trackerDisplayLabel(model))}</strong><span>${escapeHtml(cycleLabel(model))} · ${formatPercent(actual)} used</span></div>
 					<span class="runway-outcome"><i></i>${escapeHtml(physics.status)}</span>
 				</header>
-				<div class="runway-stage" role="img" aria-label="${escapeHtml(sceneLabel)}">
-					<div class="runway-sky" aria-hidden="true"><i></i><i></i><i></i></div>
-					<div class="runway-horizon" aria-hidden="true"></div>
-					<div class="runway-abyss" aria-hidden="true"></div>
-					<div class="runway-strip" aria-hidden="true">
-						<div class="runway-pavement">
-							<div class="runway-rush"></div>
-							<div class="runway-centerline"></div>
-						</div>
-						<div class="runway-end">
-							<div class="runway-drop-face"></div>
-							<div class="runway-threshold"><span></span><span></span><span></span><span></span><span></span></div>
-						</div>
-					</div>
-					${scene.ghost ? `
-					<div class="runway-ghost-link runway-ghost-${scene.ghost.kind}" aria-hidden="true"></div>
-					<div class="runway-ghost-plane runway-ghost-${scene.ghost.kind}" aria-hidden="true">
-						<i class="ghost-wing ghost-wing-left"></i>
-						<i class="ghost-wing ghost-wing-right"></i>
-						<i class="ghost-tailplane ghost-tailplane-left"></i>
-						<i class="ghost-tailplane ghost-tailplane-right"></i>
-						<i class="ghost-fuselage"></i>
-					</div>` : ''}
-					<div class="runway-gate-label" aria-hidden="true"><span>${escapeHtml(gateLabel)}</span></div>
-					<div class="runway-brake-glow" aria-hidden="true"></div>
-					<div class="runway-heat" aria-hidden="true"></div>
-					<div class="aircraft-rig" aria-hidden="true">
-						<div class="aircraft-main">
-							<i class="aircraft-shadow"></i>
-							<i class="aircraft-wing aircraft-wing-left"></i>
-							<i class="aircraft-wing aircraft-wing-right"></i>
-							<i class="aircraft-tailplane aircraft-tailplane-left"></i>
-							<i class="aircraft-tailplane aircraft-tailplane-right"></i>
-							<i class="aircraft-fuselage"></i>
-							<i class="aircraft-nose"></i>
-							<i class="aircraft-cockpit"></i>
-							<i class="aircraft-fin"></i>
-						</div>
-						<div class="aircraft-fragments"><i></i><i></i><i></i><i></i><i></i><i></i></div>
-					</div>
-					<div class="runway-impact" aria-hidden="true"><i></i><i></i><i></i></div>
-					<div class="runway-hud" aria-hidden="true"><span>Δ PACE ${escapeHtml(hud.pace)}</span><span>${escapeHtml(hud.rate)}</span><span class="runway-hud-margin">${escapeHtml(hud.margin)}</span></div>
-				</div>
+				<div class="runway-readout" aria-hidden="true"><span>Δ PACE ${escapeHtml(hud.pace)}</span><span>${escapeHtml(hud.rate)}</span><span class="runway-readout-margin">${escapeHtml(hud.margin)}</span></div>
+				<svg class="runway-scene" viewBox="0 0 ${view.width} ${view.height}" role="img" aria-label="${escapeHtml(sceneLabel)}">
+					<rect class="rw-sky" x="0" y="0" width="${view.width}" height="140"></rect>
+					${stars}
+					<rect class="rw-earth" x="0" y="140" width="${view.width}" height="60"></rect>
+					<rect class="rw-beyond" x="${scene.resetX.toFixed(1)}" y="140" width="${(view.width - scene.resetX).toFixed(1)}" height="32"></rect>
+					<rect class="rw-asphalt" x="0" y="140" width="${scene.resetX.toFixed(1)}" height="32"></rect>
+					<g class="rw-flow" aria-hidden="true">${flow.join('')}</g>
+					${zone}
+					${resetGroup}
+					${ghostGroup}
+					${dryGroup}
+					${runwayJetMarkup(physics.state)}
+				</svg>
 				<footer class="runway-card-footer">
 					<p>${escapeHtml(physics.detail)}${ghostNote ? ` <em>${escapeHtml(ghostNote)}</em>` : ''}</p>
 					<dl><div><dt>Margin at reset</dt><dd>${escapeHtml(marginLabel)}<em>${escapeHtml(physics.depletion.note)}</em></dd></div><div><dt>Reset</dt><dd>${escapeHtml(resetDateTime)}${resetCountdown ? `<em>${escapeHtml(resetCountdown)}</em>` : ''}</dd></div></dl>
@@ -1581,7 +1598,7 @@ function renderRunwayView(models) {
 	return `
 		<article class="panel chart-panel runway-panel">
 			<div class="panel-heading">
-				<div><h2>Quota Runway</h2><p class="runway-intro">The runway is the quota you have left. The distance to cover is the time to reset. The gate ahead is where the quota runs dry.</p></div>
+				<div><h2>Quota Runway</h2><p class="runway-intro">The aircraft rolls toward the reset at the end of the runway. The lit gate is where the quota runs dry — past the end of the runway is spare.</p></div>
 				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-ghost-key"></i>Previous reading</span></div></div>
 			</div>
 			<div class="runway-grid-layout">${cards}</div>
@@ -1589,13 +1606,13 @@ function renderRunwayView(models) {
 	`;
 }
 
-// Applies each scene's numbers, and moves the two that carry distance from
-// where the scene last settled to where the new reading puts them. Writing
-// through CSSOM rather than a style attribute is what keeps this working under
-// the page's own Content-Security-Policy -- see renderRunwayView().
+// Applies each scene's numbers, and slides the dry gate from where it last
+// settled to where the new reading puts it. Writing through CSSOM rather than
+// a style attribute is what keeps this working under the page's own
+// Content-Security-Policy -- see renderRunwayView().
 function settleRunwayCards(root) {
 	if (!root || typeof root.querySelectorAll !== 'function') return;
-	root.querySelectorAll('.runway-card[data-runway-end]').forEach((card) => {
+	root.querySelectorAll('.runway-card[data-runway-dry]').forEach((card) => {
 		const scene = {};
 		for (const name of RUNWAY_SCENE_PROPERTIES) {
 			const value = Number(card.getAttribute(`data-runway-${name}`));
@@ -1603,20 +1620,17 @@ function settleRunwayCards(root) {
 			scene[name] = value;
 		}
 		RUNWAY_STATIC_PROPERTIES.forEach((name) => card.style.setProperty(`--runway-${name}`, String(scene[name])));
-		runwaySettled.set(card.getAttribute('data-runway-id') || '', { end: scene.end, drop: scene.drop });
+		runwaySettled.set(card.getAttribute('data-runway-id') || '', { dry: scene.dry });
 
-		const from = (card.getAttribute('data-runway-from') || '').split(',').map(Number);
-		const moving = from.length === 2
-			&& from.every(Number.isFinite)
-			&& (Math.abs(from[0] - scene.end) >= 0.01 || Math.abs(from[1] - scene.drop) >= 0.001)
+		const from = Number(card.getAttribute('data-runway-from'));
+		const moving = Number.isFinite(from)
+			&& Math.abs(from - scene.dry) >= 0.01
 			&& typeof requestAnimationFrame === 'function';
-		card.style.setProperty('--runway-end', (moving ? from[0] : scene.end).toFixed(2));
-		card.style.setProperty('--runway-drop', (moving ? from[1] : scene.drop).toFixed(3));
+		card.style.setProperty('--runway-dry', (moving ? from : scene.dry).toFixed(2));
 		if (!moving) return;
 		void card.offsetWidth;
 		requestAnimationFrame(() => {
-			card.style.setProperty('--runway-end', scene.end.toFixed(2));
-			card.style.setProperty('--runway-drop', scene.drop.toFixed(3));
+			card.style.setProperty('--runway-dry', scene.dry.toFixed(2));
 		});
 	});
 }

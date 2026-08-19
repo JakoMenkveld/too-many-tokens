@@ -1125,27 +1125,28 @@ test('runway margin is reported in hours either side of the reset', () => {
 // not with the band. Two cards in the same band at different margins must not
 // draw the same picture.
 test('runway geometry moves continuously with the margin, not with the band', () => {
-  const depthFor = (projectedHoursToDepletion) => runwayScene(
+  const dryFor = (projectedHoursToDepletion) => runwayScene(
     runwayPhysics(runwayModel({ projectedHoursToDepletion }))
-  ).endDepth;
+  ).dryX;
 
-  const depths = [260, 200, 150, 120, 105].map(depthFor);
-  depths.slice(1).forEach((value, index) => {
-    assert.ok(value > depths[index], `gate should draw nearer as margin shrinks: ${depths.join(', ')}`);
+  // More margin puts the dry gate further down the axis -- later in time.
+  const gates = [105, 120, 150, 200, 260].map(dryFor);
+  gates.slice(1).forEach((value, index) => {
+    assert.ok(value > gates[index], 'the dry gate should move right as margin grows');
   });
+
+  // Margin 1 lands the gate exactly on the reset threshold.
+  const onTheNumbers = runwayScene(runwayPhysics(runwayModel({ projectedHoursToDepletion: 100.8 })));
+  assert.ok(Math.abs(onTheNumbers.dryX - onTheNumbers.resetX) < 0.5, 'margin 1 is the threshold itself');
 
   // Two margins inside the same band still differ on screen.
   assert.equal(runwayPhysics(runwayModel({ projectedHoursToDepletion: 200 })).state, 'ample');
   assert.equal(runwayPhysics(runwayModel({ projectedHoursToDepletion: 260 })).state, 'ample');
-  assert.notEqual(depthFor(200), depthFor(260));
+  assert.notEqual(dryFor(200), dryFor(260));
 
-  // Overrun keeps going the same direction rather than snapping to a crash.
-  const drops = [95, 80, 60, 30].map((hours) => runwayPhysics(runwayModel({ projectedHoursToDepletion: hours })).drop);
-  assert.equal(drops[0] > 0, true);
-  drops.slice(1).forEach((value, index) => {
-    assert.ok(value > drops[index], `drop should deepen: ${drops.join(', ')}`);
-  });
-  assert.equal(drops.at(-1), 1);
+  // And the clamps keep the gate on the card at both extremes.
+  assert.ok(dryFor(2000) <= 700);
+  assert.ok(dryFor(5) >= 172);
 });
 
 // This used to render as a mint badge and a perfect landing, which was the one
@@ -1239,7 +1240,7 @@ test('runway ghost recovers the previous reading and names the change', () => {
 // The camera rides with the aircraft, so there is no room to draw a ghost
 // behind it. The ghost is always set down ahead: its distance is how much
 // changed since the last reading, its colour which way it went.
-test('the ghost aircraft is set down ahead, tinted by which way the burn moved', () => {
+test('the ghost gate lands on the side the margin moved from', () => {
   const at = (minutes) => new Date(Date.UTC(2099, 7, 12, 0, minutes)).toISOString();
   const withHistory = (earlier, now) => runwayModel({
     actualCum: now,
@@ -1249,20 +1250,16 @@ test('the ghost aircraft is set down ahead, tinted by which way the burn moved',
     usageHistory: [{ timestamp: at(0), usedPercent: earlier }, { timestamp: at(60), usedPercent: now }]
   });
 
-  // Burning harder than before: the aircraft is ahead, so the ghost trails it.
+  // Burning harder than before: the quota was going to last longer than it
+  // does now, so the previous reading sits to the right of the live gate.
   const worse = runwayScene(runwayPhysics(withHistory(0.2, 0.7)));
-  assert.equal(worse.ghost.kind, 'previous');
   assert.equal(worse.ghost.direction, 1);
-  assert.ok(worse.ghost.depth < 88, 'the ghost is always drawn ahead of the aircraft');
+  assert.ok(worse.ghost.x > worse.dryX, 'the healthier past reading lies further down the axis');
 
-  // Barely moved since: the aircraft has fallen behind its old pace.
+  // Barely moved since: the projection improved, so the past sits behind it.
   const better = runwayScene(runwayPhysics(withHistory(0.68, 0.7)));
   assert.equal(better.ghost.direction, -1);
-  assert.ok(better.ghost.depth < 88, 'the ghost is always drawn ahead of the aircraft');
-
-  // A bigger swing puts the ghost further off, and distance shrinks it.
-  assert.ok(worse.ghost.depth < better.ghost.depth, 'the larger change is drawn further away');
-  assert.ok(worse.ghost.scale < better.ghost.scale);
+  assert.ok(better.ghost.x < better.dryX, 'the worse past reading lies before the live gate');
 });
 
 // A spent quota has no runway left to measure, only time.
@@ -1274,21 +1271,22 @@ test('an exhausted quota shows the reset waiting down the runway', () => {
     totalHours: 168,
     projectedHoursToDepletion: 0
   })));
-  assert.equal(scene.ghost.kind, 'reset');
-  assert.equal(scene.ghost.direction, 0, 'the reset is not a better-or-worse comparison');
-  assert.equal(scene.ghost.approachSeconds, 20 * 3600, 'it closes over exactly the remaining wait');
-  assert.ok(scene.ghost.depth < 88, 'it waits ahead of the wreck');
+  assert.equal(scene.ghost, null, 'the countdown replaces the delta ghost');
+  assert.equal(scene.approach.seconds, 20 * 3600, 'it closes over exactly the remaining wait');
+  assert.ok(scene.resetX > 150, 'the reset stands down the runway from the wreck');
+  assert.ok(Math.abs(scene.approach.dx - (scene.resetX - 174)) < 0.5, 'the crawl ends just short of the aircraft');
 
   // Nearer the reset, it waits closer.
   const nearer = runwayScene(runwayPhysics(runwayModel({
     actualCum: 1, currentHour: 166, remainingHours: 2, totalHours: 168, projectedHoursToDepletion: 0
   })));
-  assert.ok(nearer.ghost.depth > scene.ghost.depth, 'a shorter wait draws the reset nearer');
+  assert.ok(nearer.resetX < scene.resetX, 'a shorter wait draws the reset nearer');
 
   const html = renderRunwayView([runwayModel({
     id: 'spent', actualCum: 1, currentHour: 148, remainingHours: 20, totalHours: 168, projectedHoursToDepletion: 0
   })]);
-  assert.match(html, /class="runway-ghost-plane runway-ghost-reset"/);
+  assert.match(html, /rw-reset-slider rw-reset-approach/);
+  assert.match(html, /class="rw-smoke"/);
   assert.match(html, /data-runway-approach="72000"/);
 });
 
@@ -1315,24 +1313,27 @@ test('runway view renders the scene from the numbers rather than from a class', 
   assert.equal((html.match(/class="runway-card runway-ample"/g) || []).length, 1);
   assert.equal((html.match(/class="runway-card runway-off-end"/g) || []).length, 1);
 
-  // Every card carries its own geometry, and carries it somewhere the page's
-  // Content-Security-Policy will not throw away.
-  ['end', 'drop', 'severity', 'speed', 'brake', 'ghost'].forEach((name) => {
+  // Every card carries its animated values somewhere the page's
+  // Content-Security-Policy will not throw away; static geometry is plain
+  // SVG attributes, which CSP does not govern either.
+  ['severity', 'speed', 'dry', 'approach', 'approach-dx'].forEach((name) => {
     assert.equal((html.match(new RegExp(`data-runway-${name}="`, 'g')) || []).length, 2, `missing data-runway-${name}`);
   });
 
-  assert.match(html, /class="aircraft-nose"/);
-  assert.match(html, /class="runway-abyss"/);
-  assert.match(html, /class="runway-end"/);
-  assert.match(html, /class="runway-pavement"/);
-  // The moving ground is its own layer so it can be transformed; animating
-  // background-position updated the computed value without ever repainting.
-  assert.equal((html.match(/class="runway-rush"/g) || []).length, 2);
-  assert.match(html, /class="runway-drop-face"/);
+  assert.equal((html.match(/<svg class="runway-scene"/g) || []).length, 2);
+  assert.equal((html.match(/class="rw-jet"/g) || []).length, 2);
+  assert.equal((html.match(/class="rw-flow"/g) || []).length, 2);
+  assert.equal((html.match(/class="rw-dry"/g) || []).length, 2);
+  assert.equal((html.match(/class="rw-reset"/g) || []).length, 2);
+  // The safe card's spare quota lies past the end of the runway; the overrun
+  // card's stranded stretch lies on it.
+  assert.match(html, /rw-zone-spare/);
+  assert.match(html, /rw-zone-short/);
   assert.match(html, /Ample runway/);
   assert.match(html, /Off the end/);
   assert.match(html, /Δ PACE/);
   assert.match(html, /to dry/);
+  assert.match(html, /reset in /);
   assert.match(html, /<dt>Margin at reset<\/dt><dd>3d spare/);
   assert.match(html, /<dt>Reset<\/dt><dd>Thu, 13 Aug 2099 at 14:30/);
 });
@@ -1351,19 +1352,19 @@ test('runway scene values never travel in a style attribute', () => {
 });
 
 test('settling a card applies every scene value to the element', () => {
-  const html = renderRunwayView([runwayModel({ id: 'applied', actualCum: 1, projectedHoursToDepletion: 0 })]);
+  const html = renderRunwayView([runwayModel({ id: 'applied', actualCum: 1, currentHour: 148, remainingHours: 20, totalHours: 168, projectedHoursToDepletion: 0 })]);
   const card = createRunwayCardStub(html);
   settleRunwayCards({ querySelectorAll: () => [card] });
 
   assert.equal(card.style.values['--runway-severity'], '1');
-  assert.equal(card.style.values['--runway-drop'], '1.000');
-  assert.equal(card.style.values['--runway-end'], card.attributes['data-runway-end']);
-  ['end', 'drop', 'severity', 'speed', 'brake', 'ghost'].forEach((name) => {
+  assert.equal(card.style.values['--runway-approach'], '72000');
+  assert.equal(card.style.values['--runway-dry'], card.attributes['data-runway-dry']);
+  ['severity', 'speed', 'dry', 'approach', 'approach-dx'].forEach((name) => {
     assert.ok(card.style.values[`--runway-${name}`] !== undefined, `--runway-${name} was not applied`);
   });
 });
 
-// The from-values only exist so a refresh can move between two readings.
+// The from-value only exists so a refresh can slide between two readings.
 test('runway cards settle from the previous geometry on the next render', () => {
   const model = runwayModel({ id: 'settling', projectedHoursToDepletion: 200 });
   const first = renderRunwayView([model]);
@@ -1379,16 +1380,16 @@ test('runway cards settle from the previous geometry on the next render', () => 
   settleRunwayCards({ querySelectorAll: () => [moving] });
 
   // Set back to where the scene already was, then handed the new value on the
-  // next frame -- which is what makes it a transition rather than a jump.
-  assert.equal(moving.style.values['--runway-end'], cards[0].attributes['data-runway-end']);
+  // next frame -- which is what makes it a slide rather than a jump.
+  assert.equal(moving.style.values['--runway-dry'], cards[0].attributes['data-runway-dry']);
   assert.equal(frames.length, 1);
   frames[0]();
-  assert.equal(moving.style.values['--runway-end'], moving.attributes['data-runway-end']);
+  assert.equal(moving.style.values['--runway-dry'], moving.attributes['data-runway-dry']);
 });
 
 function createRunwayCardStub(html, frames) {
   const attributes = {};
-  for (const [, name, value] of html.matchAll(/(data-runway-[a-z]+)="([^"]*)"/g)) attributes[name] = value;
+  for (const [, name, value] of html.matchAll(/(data-runway-[a-z-]+)="([^"]*)"/g)) attributes[name] = value;
   globalThis.requestAnimationFrame = frames ? (callback) => frames.push(callback) : undefined;
   return {
     attributes,
