@@ -992,7 +992,7 @@ function renderRefreshPlanPanel(plan = preferences.refreshPlan, now = Date.now()
 				<label class="refresh-field"><span>How many</span><select data-refresh-count>${countOptions}</select></label>
 				${running ? '<span class="refresh-plan-hint">Changing either restarts the run.</span>' : ''}
 			</div>
-			<p class="refresh-plan-note">Each refresh reloads your provider tabs and reads them. A run stops on its own after the count above — nothing repeats in the background. Press Sync in the header for a single reading now. ${selectedTabIds.length ? '' : 'Select provider tabs on Setup before starting.'}</p>
+			<p class="refresh-plan-note">Each refresh reloads your provider tabs and reads them. A run stops on its own after the count above — nothing repeats in the background. Press Sync for a single reading now. ${selectedTabIds.length ? '' : 'Select provider tabs on Setup before starting.'}</p>
 		</section>
 	`;
 }
