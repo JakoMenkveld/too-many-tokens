@@ -1287,6 +1287,11 @@ test('an exhausted quota shows the reset waiting down the runway', () => {
   })]);
   assert.match(html, /rw-reset-slider rw-reset-approach/);
   assert.match(html, /class="rw-smoke"/);
+  // Crashed into the gate, not parked short of it: the gate leans and the
+  // aircraft noses down against it.
+  assert.match(html, /class="rw-dry-hit" transform="rotate\(9 0 140\)"/);
+  assert.match(html, /rw-jet rw-jet-dead" transform="rotate\(-2.5 154 140\)"/);
+  assert.ok(scene.dryX <= 158, 'the dry gate touches the nose');
   assert.match(html, /data-runway-approach="72000"/);
 });
 
@@ -1329,6 +1334,11 @@ test('runway view renders the scene from the numbers rather than from a class', 
   // card's stranded stretch lies on it.
   assert.match(html, /rw-zone-spare/);
   assert.match(html, /rw-zone-short/);
+  // The even-pace target: a ring on every threshold, and a comparator line
+  // spanning the gap between the dry gate and where even pace would put it.
+  assert.equal((html.match(/class="rw-target-ring"/g) || []).length, 2);
+  assert.match(html, /rw-margin-line rw-margin-spare/);
+  assert.match(html, /rw-margin-line rw-margin-short/);
   assert.match(html, /Ample runway/);
   assert.match(html, /Off the end/);
   assert.match(html, /Δ PACE/);

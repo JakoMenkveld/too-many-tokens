@@ -1390,7 +1390,9 @@ function runwayScene(physics) {
 		const waiting = clamp(physics.runwayHours / physics.cycleHours, 0, 1);
 		const resetX = clamp(view.planeX + (view.maxX - view.planeX) * waiting, view.planeX + 34, view.maxX - 10);
 		return {
-			dryX: view.planeX + 12,
+			// Nose against the gate: the aircraft rolled until the quota died
+			// there, so the two touch.
+			dryX: view.planeX + 6,
 			resetX,
 			ghost: null,
 			approach: {
@@ -1464,7 +1466,7 @@ function runwayOutcome(model) {
 function runwayJetMarkup(state) {
 	const dead = state === 'exhausted';
 	return `
-					<g class="rw-jet${dead ? ' rw-jet-dead' : ''}" aria-hidden="true">
+					<g class="rw-jet${dead ? ' rw-jet-dead' : ''}"${dead ? ' transform="rotate(-2.5 154 140)"' : ''} aria-hidden="true">
 						<ellipse class="rw-jet-shadow" cx="106" cy="141.5" rx="52" ry="3.6"></ellipse>
 						<path class="rw-jet-fin" d="M80 114 L62 86 L74 86 L94 114 Z"></path>
 						<circle class="rw-beacon" cx="64" cy="84.5" r="2.2"></circle>
@@ -1533,20 +1535,31 @@ function renderRunwayView(models) {
 		const dryGroup = scene.dryX === null
 			? `<text class="rw-label rw-note" x="330" y="112" text-anchor="middle">no rate yet</text>`
 			: `<g class="rw-dry">
-						<line x1="0" y1="96" x2="0" y2="140"></line>
-						<circle class="rw-dry-light" cx="0" cy="90" r="4.5"></circle>
+						<g${physics.state === 'exhausted' ? ' class="rw-dry-hit" transform="rotate(9 0 140)"' : ''}>
+							<line x1="0" y1="96" x2="0" y2="140"></line>
+							<circle class="rw-dry-light" cx="0" cy="90" r="4.5"></circle>
+						</g>
 						<text class="rw-label rw-dry-label" x="${labelDx}" y="76" text-anchor="middle">${escapeHtml(gateLabel)}</text>
 					</g>`;
 
 		// The threshold's slider is a separate inner group because a CSS
 		// transform would override the outer group's positioning attribute.
+		const marginLine = scene.approach || scene.dryX === null ? '' : (() => {
+			const left = Math.min(scene.dryX, scene.resetX) + 9;
+			const right = Math.max(scene.dryX, scene.resetX) - 9;
+			if (right - left < 6) return '';
+			const tone = scene.dryX >= scene.resetX ? 'spare' : 'short';
+			return `<line class="rw-margin-line rw-margin-${tone}" x1="${left.toFixed(1)}" y1="90" x2="${right.toFixed(1)}" y2="90"></line>`;
+		})();
+
 		const resetGroup = `<g class="rw-reset" transform="translate(${scene.resetX.toFixed(1)} 0)">
 						<g class="rw-reset-slider${scene.approach ? ' rw-reset-approach' : ''}">
+							<circle class="rw-target-ring" cx="0" cy="90" r="7.5"></circle>
 							<rect class="rw-check-a" x="-12" y="140" width="8" height="7"></rect>
 							<rect class="rw-check-b" x="-4" y="140" width="8" height="7"></rect>
 							<rect class="rw-check-a" x="4" y="140" width="8" height="7"></rect>
 							<rect class="rw-reset-post" x="-2" y="98" width="4" height="42" rx="1"></rect>
-							<circle class="rw-reset-light" cx="0" cy="93" r="4"></circle>
+							<circle class="rw-reset-light" cx="0" cy="90" r="4"></circle>
 							<text class="rw-label rw-reset-label" x="0" y="190" text-anchor="middle">${escapeHtml(reset ? `reset in ${formatCountdown(reset)}` : 'reset pending')}</text>
 						</g>
 					</g>`;
@@ -1583,6 +1596,7 @@ function renderRunwayView(models) {
 					<rect class="rw-asphalt" x="0" y="140" width="${scene.resetX.toFixed(1)}" height="32"></rect>
 					<g class="rw-flow" aria-hidden="true">${flow.join('')}</g>
 					${zone}
+					${marginLine}
 					${resetGroup}
 					${ghostGroup}
 					${dryGroup}
@@ -1599,7 +1613,7 @@ function renderRunwayView(models) {
 		<article class="panel chart-panel runway-panel">
 			<div class="panel-heading">
 				<div><h2>Quota Runway</h2><p class="runway-intro">The aircraft rolls toward the reset at the end of the runway. The lit gate is where the quota runs dry — past the end of the runway is spare.</p></div>
-				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-ghost-key"></i>Previous reading</span></div></div>
+				<div class="pace-heading-actions">${renderPaceViewToggle('runway')}<div class="runway-legend"><span class="runway-legend-scale"><i></i>Ample → off the end</span><span><i class="runway-target-key"></i>Even-pace target</span><span><i class="runway-ghost-key"></i>Previous reading</span></div></div>
 			</div>
 			<div class="runway-grid-layout">${cards}</div>
 		</article>
