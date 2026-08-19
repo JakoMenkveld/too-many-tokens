@@ -869,8 +869,19 @@ select:focus-visible {
 	position: absolute;
 	inset: 0;
 	content: '';
-	background: repeating-linear-gradient(174deg, transparent 0 19px, rgba(255, 255, 255, 0.02) 20px 21px);
-	mix-blend-mode: screen;
+	/* Edge dashes either side of the fuselage, plus a faint full-width surface
+	   texture. These are the parts of the ground the aircraft does not cover,
+	   so this is where the burn rate is actually legible as motion. */
+	background-image:
+		repeating-linear-gradient(180deg, rgba(240, 245, 255, 0.5) 0 4%, transparent 4% 12.5%),
+		repeating-linear-gradient(180deg, rgba(240, 245, 255, 0.5) 0 4%, transparent 4% 12.5%),
+		repeating-linear-gradient(180deg, rgba(255, 255, 255, 0.07) 0 5%, transparent 5% 12.5%);
+	background-size: 2.6% 100%, 2.6% 100%, 100% 100%;
+	background-position-x: 9%, 91%, 0;
+	background-repeat: repeat-y;
+	-webkit-mask-image: linear-gradient(180deg, transparent, #000 26%);
+	mask-image: linear-gradient(180deg, transparent, #000 26%);
+	animation: runway-ground-rush calc(2.9s / var(--runway-speed)) linear infinite;
 }
 
 /* The one honest use of motion: the ground still moving past a rolling
@@ -883,11 +894,12 @@ select:focus-visible {
 	width: 3.2%;
 	height: 100%;
 	z-index: 2;
-	background: repeating-linear-gradient(180deg, rgba(243, 245, 249, 0.9) 0 9%, transparent 9% 22%);
+	background-image: repeating-linear-gradient(180deg, rgba(243, 245, 249, 0.9) 0 5%, transparent 5% 12.5%);
+	background-repeat: repeat-y;
 	-webkit-mask-image: linear-gradient(180deg, transparent, #000 30%);
 	mask-image: linear-gradient(180deg, transparent, #000 30%);
 	transform: translateX(-50%);
-	animation: runway-marking-flow calc(2.9s / var(--runway-speed)) linear infinite;
+	animation: runway-ground-rush calc(2.9s / var(--runway-speed)) linear infinite;
 }
 
 /* Where the gate sat at the previous reading. Recomputed from history, so it
@@ -1291,9 +1303,9 @@ select:focus-visible {
 	font-weight: 650;
 }
 
-@keyframes runway-marking-flow {
-	from { background-position-y: 0; }
-	to { background-position-y: 22%; }
+@keyframes runway-ground-rush {
+	from { background-position-y: 0%; }
+	to { background-position-y: 12.5%; }
 }
 
 @keyframes runway-rumble {
