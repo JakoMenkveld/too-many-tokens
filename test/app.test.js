@@ -9,6 +9,8 @@ const {
   formatRefreshInterval,
   formatResetDateTime,
   isExtensionRefreshCommand,
+  noteExtensionBridgeReady,
+  waitForExtensionBridge,
   rateLimitRetryAt,
   rateLimitState,
   isRefreshPlanRunning,
@@ -112,9 +114,60 @@ function createStorage(initial = {}) {
   };
 }
 
+// content_scripts run at document_idle, so on a fresh page load there is a
+// window with no listener for bridge messages. window.postMessage does not queue
+// and does not throw, so a request sent then is lost outright and the caller
+// waits out its whole timeout for a reply nobody was ever going to send.
+test('a request made before the content script exists is held, not lost', async () => {
+  const harness = createWindowHarness();
+  global.window = harness.win;
+
+  const pending = sendExtensionRequest('EXTENSION_LIST_TABS', {}, 1000);
+  assert.equal(harness.requests.length, 0, 'nothing may be posted while nothing is listening');
+
+  noteExtensionBridgeReady(harness.win);
+  // A macrotask, so every microtask hop in the readiness handoff has drained.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.requests.length, 1, 'the request goes out once the bridge announces itself');
+
+  harness.win.dispatch({
+    channel: 'llm-run-rate-tracker',
+    direction: 'response',
+    type: 'EXTENSION_LIST_TABS_RESPONSE',
+    requestId: harness.requests[0].message.requestId,
+    payload: { ok: true, marker: 'held' }
+  });
+  assert.equal((await pending).marker, 'held');
+  assert.equal(harness.win.listenerCount(), 0);
+  delete global.window;
+});
+
+test('a page with no content script says so instead of timing out silently', async () => {
+  const harness = createWindowHarness();
+  global.window = harness.win;
+
+  const response = await sendExtensionRequest('EXTENSION_LIST_TABS', {}, 1000, 20);
+  assert.equal(response.ok, false);
+  assert.match(response.error, /extension is not running on this page/i);
+  assert.match(response.error, /content_scripts/);
+  assert.equal(harness.requests.length, 0, 'nothing is posted into the void');
+  assert.equal(harness.win.listenerCount(), 0);
+  delete global.window;
+});
+
+test('bridge readiness is per page, so one page does not vouch for another', async () => {
+  const first = createWindowHarness();
+  const second = createWindowHarness();
+  noteExtensionBridgeReady(first.win);
+
+  assert.equal(await waitForExtensionBridge(20, first.win), true);
+  assert.equal(await waitForExtensionBridge(20, second.win), false);
+});
+
 test('concurrent extension requests only accept their correlated response', async () => {
   const harness = createWindowHarness();
   global.window = harness.win;
+  noteExtensionBridgeReady(harness.win);
 
   const first = sendExtensionRequest('EXTENSION_LIST_TABS', {}, 1000);
   const second = sendExtensionRequest('EXTENSION_LIST_TABS', {}, 1000);
@@ -147,6 +200,7 @@ test('concurrent extension requests only accept their correlated response', asyn
 test('extension request timeouts return an explicit error and remove listeners', async () => {
   const harness = createWindowHarness();
   global.window = harness.win;
+  noteExtensionBridgeReady(harness.win);
 
   const response = await sendExtensionRequest('EXTENSION_LIST_TABS', {}, 5);
   assert.equal(response.ok, false);

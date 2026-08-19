@@ -103,13 +103,6 @@ if (globalThis.chrome?.runtime?.onMessage?.addListener) {
   });
 }
 
-// The first line the page console shows. If it is absent, the content script
-// was never injected here -- check the origin against the manifest's
-// content_scripts matches -- and every bridge request will time out untouched.
-if (globalThis.chrome?.runtime?.id) {
-  log.debug(`Bridge ready on ${globalThis.location?.origin}`);
-}
-
 if (globalThis.window?.addEventListener) {
   window.addEventListener('message', (event) => {
     handleWindowMessage(event).catch((error) => {
@@ -122,6 +115,21 @@ if (globalThis.window?.addEventListener) {
       }
     });
   });
+}
+
+// content_scripts run at document_idle, which is after the page's own scripts
+// have run. Until this file is injected there is no listener on the page's
+// window, and window.postMessage neither queues nor errors -- a request sent in
+// that gap is simply lost, and the page waits out its whole timeout for a reply
+// that was never going to come. So the bridge announces itself, and the page
+// waits for this before sending anything.
+//
+// This is posted last, after the message listener above is installed, so a
+// request answering the beacon cannot arrive before we can hear it. It carries
+// no data and tells the page only that a content script exists here.
+if (globalThis.chrome?.runtime?.id && globalThis.window) {
+  log.debug(`Bridge ready on ${globalThis.location?.origin}`);
+  postBridgeCommand(window, 'EXTENSION_BRIDGE_READY');
 }
 
 if (typeof module === 'object' && module.exports) {

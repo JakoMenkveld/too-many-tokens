@@ -29,6 +29,10 @@ const REFRESH_COUNT_DEFAULT = 5;
 const REFRESH_COUNT_MIN = 1;
 const REFRESH_COUNT_MAX = 10;
 const SCAN_REQUEST_TIMEOUT_MS = 45_000;
+// How long a bridge request waits for the content script to be injected before
+// giving up and saying so. content_scripts run at document_idle, so this only
+// has to cover the tail of page load.
+const EXTENSION_BRIDGE_READY_GRACE_MS = 10_000;
 const CHART_COLORS = ['violet', 'cyan', 'mint', 'amber', 'rose', 'blue'];
 const PAGE_CONFIG = Object.freeze({
 	overview: { title: 'Overview' },
@@ -2146,6 +2150,39 @@ function applyScrapedPayload(payload) {
 	return applyScrapedPayloads([payload]) === 1;
 }
 
+// Whether a content script has announced itself on this page. Keyed by window
+// rather than held in a module variable, because it is a fact about one page
+// and nothing else -- which also means it cannot leak between tests.
+const extensionBridgeReadiness = new WeakMap();
+
+function extensionBridgeState(win = globalThis.window) {
+	let state = extensionBridgeReadiness.get(win);
+	if (!state) {
+		let announce;
+		const announced = new Promise((resolve) => { announce = resolve; });
+		state = { ready: false, announced, announce };
+		extensionBridgeReadiness.set(win, state);
+	}
+	return state;
+}
+
+function isExtensionBridgeReadyCommand(event) {
+	return event?.source === window
+		&& event.origin === window.location.origin
+		&& event.data?.channel === EXTENSION_BRIDGE_CHANNEL
+		&& event.data?.direction === 'command'
+		&& event.data?.type === 'EXTENSION_BRIDGE_READY';
+}
+
+function noteExtensionBridgeReady(win = globalThis.window) {
+	const state = extensionBridgeState(win);
+	if (state.ready) return false;
+	state.ready = true;
+	bridgeLog('Extension bridge announced itself');
+	state.announce();
+	return true;
+}
+
 // The extension's popup asks the page to run its own refresh rather than
 // scanning separately. Accepting this grants the extension nothing new -- the
 // page can already start a scan whenever it likes.
@@ -2158,12 +2195,37 @@ function isExtensionRefreshCommand(event) {
 }
 
 function handleExtensionCommand(event) {
+	if (isExtensionBridgeReadyCommand(event)) return noteExtensionBridgeReady(window);
 	if (!isExtensionRefreshCommand(event)) return false;
+	// A refresh command proves a content script is here even if the page missed
+	// the beacon, which it would if this script started late.
+	noteExtensionBridgeReady(window);
 	void connectAndScan();
 	return true;
 }
 
-async function sendExtensionRequest(type, details = {}, timeoutMs = 15_000) {
+async function waitForExtensionBridge(graceMs = EXTENSION_BRIDGE_READY_GRACE_MS, win = globalThis.window) {
+	const state = extensionBridgeState(win);
+	if (state.ready) return true;
+	let timer;
+	const expired = new Promise((resolve) => { timer = setTimeout(() => resolve(false), graceMs); });
+	const ready = await Promise.race([state.announced.then(() => true), expired]);
+	clearTimeout(timer);
+	return ready;
+}
+
+async function sendExtensionRequest(type, details = {}, timeoutMs = 15_000, graceMs = EXTENSION_BRIDGE_READY_GRACE_MS) {
+	// Nothing is listening until the content script is injected. Waiting here is
+	// what stops a request made during page load from vanishing unanswered. Once
+	// the bridge is known to be up this stays synchronous, so a request still
+	// posts in the same turn it was made.
+	if (!extensionBridgeState().ready && !await waitForExtensionBridge(graceMs)) {
+		bridgeLog(`No extension bridge on ${window.location.origin}; not sending ${type}`);
+		return {
+			ok: false,
+			error: `The extension is not running on this page (${window.location.origin}). Check it is loaded and that this origin is listed in its content_scripts matches, then reload.`
+		};
+	}
 	return new Promise((resolve) => {
 		const responseType = `${type}_RESPONSE`;
 		const requestId = globalThis.crypto?.randomUUID?.() || id();
@@ -2336,7 +2398,10 @@ if (typeof module === 'object' && module.exports) {
 		documentTitle,
 		formatRefreshInterval,
 		handleExtensionCommand,
+		isExtensionBridgeReadyCommand,
 		isExtensionRefreshCommand,
+		noteExtensionBridgeReady,
+		waitForExtensionBridge,
 		isRefreshPlanRunning,
 		rateLimitRetryAt,
 		rateLimitState,
