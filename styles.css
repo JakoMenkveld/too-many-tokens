@@ -209,6 +209,17 @@ a {
 	line-height: 1;
 }
 
+.demo-banner {
+	margin: -8px 0 20px;
+	padding: 9px 12px;
+	border: 1px solid rgba(139, 127, 255, 0.28);
+	border-radius: 10px;
+	background: rgba(139, 127, 255, 0.08);
+	color: var(--muted-bright);
+	font-size: 0.82rem;
+	letter-spacing: 0.01em;
+}
+
 .mobile-brand {
 	display: none;
 }

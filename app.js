@@ -50,6 +50,13 @@ const ICON_PATHS = Object.freeze({
 	check: '<path d="m7 12 3 3 7-7"></path>',
 	plus: '<path d="M12 5v14"></path><path d="M5 12h14"></path>'
 });
+const DEMO_QUERY = typeof window !== 'undefined' && typeof URLSearchParams === 'function'
+	? new URLSearchParams(window.location.search)
+	: null;
+const DEMO_MODE = DEMO_QUERY?.get('demo') === '1';
+const DEMO_VIEW = ['bars', 'graph', 'runway'].includes(DEMO_QUERY?.get('view'))
+	? DEMO_QUERY.get('view')
+	: 'bars';
 const trackerCore = globalThis.TrackerCore
 	|| (typeof require === 'function' ? require('./tracker-core.js') : null);
 const providers = globalThis.UsageProviders
@@ -67,11 +74,13 @@ let chromeTicker = null;
 let nextAutoSyncAt = null;
 let lastSyncedAt = null;
 let rateLimitedUntil = null;
-let autoScanStatus = typeof document !== 'undefined' ? 'Finding provider tabs…' : 'Ready';
+let autoScanStatus = DEMO_MODE
+	? 'Demo data · no provider connection'
+	: typeof document !== 'undefined' ? 'Finding provider tabs…' : 'Ready';
 let availableTabs = [];
 let selectedTabIds = [];
 let scanInProgress = false;
-let tabDiscoveryInProgress = typeof document !== 'undefined';
+let tabDiscoveryInProgress = typeof document !== 'undefined' && !DEMO_MODE;
 let pendingSettingsId = null;
 const expandedSettings = new Set();
 let preferences = defaultPreferences();
@@ -236,6 +245,7 @@ function loadPreferences(storage = globalThis.localStorage) {
 
 function savePreferences(value, storage = globalThis.localStorage) {
 	const sanitized = sanitizePreferences(value);
+	if (DEMO_MODE) return sanitized;
 	storage?.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(sanitized));
 	return sanitized;
 }
@@ -409,7 +419,51 @@ function migrateStoredModels(models) {
 	return { models: migrated, changed: migrated.length !== source.length };
 }
 
+function demoModels(nowValue = Date.now()) {
+	const now = Number.isFinite(Number(nowValue)) ? Number(nowValue) : Date.now();
+	const hour = 60 * 60 * 1000;
+	const updatedAt = new Date(now - 2 * 60 * 1000).toISOString();
+	const weeklyReset = new Date(now + 127 * hour).toISOString();
+	const sampleHistory = (earlier, latest) => [
+		{ timestamp: new Date(now - 6 * hour).toISOString(), usedPercent: earlier },
+		{ timestamp: new Date(now - 1 * hour).toISOString(), usedPercent: latest }
+	];
+	return [
+		{
+			...DEFAULT_MODEL,
+			id: 'demo-claude-all-models',
+			provider: 'Claude',
+			model: 'All models',
+			metricKey: 'weekly-all-models',
+			metricLabel: 'All models',
+			sourceUrl: 'https://claude.ai/settings/usage',
+			description: 'Sample data for the dashboard demo',
+			lastUpdatedAt: updatedAt,
+			usageHistory: sampleHistory(0.28, 0.32),
+			resetAt: weeklyReset,
+			currentHour: 41,
+			actualCumUsedPercent: 0.34
+		},
+		{
+			...DEFAULT_MODEL,
+			id: 'demo-openai-weekly',
+			provider: 'OpenAI',
+			model: 'Weekly usage',
+			metricKey: 'weekly',
+			metricLabel: 'Weekly usage',
+			sourceUrl: 'https://chatgpt.com/codex/settings/usage',
+			description: 'Sample data for the dashboard demo',
+			lastUpdatedAt: updatedAt,
+			usageHistory: sampleHistory(0.18, 0.21),
+			resetAt: weeklyReset,
+			currentHour: 41,
+			actualCumUsedPercent: 0.23
+		}
+	];
+}
+
 function loadModels() {
+	if (DEMO_MODE) return demoModels();
 	try {
 		const models = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
 		if (!Array.isArray(models)) return [];
@@ -422,6 +476,7 @@ function loadModels() {
 }
 
 function saveModels(models) {
+	if (DEMO_MODE) return;
 	localStorage.setItem(STORAGE_KEY, JSON.stringify(models));
 }
 
@@ -926,6 +981,7 @@ function renderDashboard(models, enabledModels, page) {
 				<button class="header-sync-button ${scanInProgress ? 'is-syncing' : ''}" data-action="connect-scan" aria-label="${syncLabel}" title="${syncLabel}" ${scanInProgress ? 'disabled' : ''}>${icon('refresh')}</button>
 			</div>`}
 		</header>
+		${DEMO_MODE ? '<p class="demo-banner" role="note">Demo mode · sample quota data · no provider connection</p>' : ''}
 
 		${renderMobileNavigation(page)}
 		<div class="page-view page-${escapeHtml(page)}">${renderPage(page, models, enabledModels)}</div>
@@ -2506,6 +2562,7 @@ function escapeHtml(text) {
 
 if (typeof document !== 'undefined') {
 	preferences = loadPreferences();
+	if (DEMO_MODE) preferences = { ...preferences, overviewPaceView: DEMO_VIEW };
 	lastSyncedAt = latestModelUpdate(loadModels());
 	startChromeTicker();
 	window.addEventListener('message', handleExtensionCommand);
@@ -2515,7 +2572,7 @@ if (typeof document !== 'undefined') {
 		window.scrollTo({ top: 0 });
 	});
 	render();
-	void restoreProviderSync();
+	if (!DEMO_MODE) void restoreProviderSync();
 	requestAnimationFrame(() => window.scrollTo({ top: 0 }));
 }
 
@@ -2551,6 +2608,7 @@ if (typeof module === 'object' && module.exports) {
 		isOpenAiDayPayloadArtifact,
 		isValueOnlyLabelPayloadArtifact,
 		isValueOnlyMetricLabel,
+		demoModels,
 		isTrackerEnabled,
 		loadModels,
 		loadPreferences,

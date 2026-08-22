@@ -4,6 +4,8 @@ Know on Tuesday whether you're going to blow through your Claude or ChatGPT week
 
 ![Too Many Tokens overview](assets/screenshot.png)
 
+![Too Many Tokens demo](assets/demo.gif)
+
 > ## Read this before you install it
 >
 > **This tool works in a way that Anthropic's and OpenAI's terms prohibit.** It is
@@ -73,6 +75,16 @@ http://localhost:5074
 ```
 
 The server listens only on `127.0.0.1`. It exposes five browser assets: `index.html`, `styles.css`, `app.js`, `tracker-core.js`, and `providers.js`. Other repository files are not served.
+
+### Preview with sample data
+
+To preview the dashboard without connecting the extension or writing sample data to local storage, open:
+
+```text
+http://localhost:5074/?demo=1
+```
+
+Use `&view=bars`, `&view=graph`, or `&view=runway` to open a particular Overview view. Demo mode uses fake quota readings and never contacts a provider.
 
 ## Install the Chrome extension
 

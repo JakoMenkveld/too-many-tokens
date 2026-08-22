@@ -30,6 +30,7 @@ const {
   isValueOnlyLabelPayloadArtifact,
   isValueOnlyMetricLabel,
   isOpenAiDayPayloadArtifact,
+  demoModels,
   isTrackerEnabled,
   latestModelUpdate,
   loadModels,
@@ -113,6 +114,21 @@ function createStorage(initial = {}) {
     }
   };
 }
+
+test('demo mode provides deterministic sample quota trackers', () => {
+  const now = Date.parse('2026-08-22T08:00:00.000Z');
+  const models = demoModels(now);
+
+  assert.deepEqual(models.map((model) => model.id), [
+    'demo-claude-all-models',
+    'demo-openai-weekly'
+  ]);
+  assert.deepEqual(models.map((model) => model.provider), ['Claude', 'OpenAI']);
+  assert.equal(models[0].actualCumUsedPercent, 0.34);
+  assert.equal(models[0].currentHour, 41);
+  assert.equal(models[0].resetAt, '2026-08-27T15:00:00.000Z');
+  assert.equal(models[0].usageHistory.length, 2);
+});
 
 // content_scripts run at document_idle, so on a fresh page load there is a
 // window with no listener for bridge messages. window.postMessage does not queue
