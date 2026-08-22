@@ -1224,12 +1224,15 @@ function projectedDepletionContext(model) {
 	}
 	const withinCycle = projectedHours <= remainingHours;
 	const value = formatDurationHours(projectedHours);
+	const marginHours = Math.max(0, remainingHours - projectedHours);
+	const marginDays = Math.max(1, Math.round(marginHours / 24));
+	const marginLabel = marginHours > 0 ? `~${marginDays}d before reset` : 'at reset';
 	return {
 		value: withinCycle ? value : '—',
-		note: withinCycle ? 'before reset' : 'not before reset',
+		note: withinCycle ? marginLabel : 'not before reset',
 		tone: withinCycle ? 'warning' : 'healthy',
 		label: withinCycle
-			? `At the current average usage rate, depletion is projected in ${value}, before the reset`
+			? `At the current average usage rate, depletion is projected in ${value}, ${marginLabel}`
 			: 'Quota is not projected to deplete before the reset'
 	};
 }

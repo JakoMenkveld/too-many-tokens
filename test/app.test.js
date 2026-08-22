@@ -1439,9 +1439,18 @@ test('projected depletion distinguishes exhaustion before and after reset', () =
     projectedDepletionContext({ actualCum: 0.5, currentHour: 48, totalHours: 168 }),
     {
       value: '2d',
-      note: 'before reset',
+      note: '~3d before reset',
       tone: 'warning',
-      label: 'At the current average usage rate, depletion is projected in 2d, before the reset'
+      label: 'At the current average usage rate, depletion is projected in 2d, ~3d before reset'
+    }
+  );
+  assert.deepEqual(
+    projectedDepletionContext({ actualCum: 0.34, currentHour: 41, totalHours: 168 }),
+    {
+      value: '3d 7h',
+      note: '~2d before reset',
+      tone: 'warning',
+      label: 'At the current average usage rate, depletion is projected in 3d 7h, ~2d before reset'
     }
   );
   assert.equal(
